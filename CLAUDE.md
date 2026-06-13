@@ -23,5 +23,16 @@ for the full reasoning.
 
 ## Before claiming something works
 
-Run the actual command and show the output. Memory numbers especially: trust measured
-`os_wired` from `vm_stat`, not MLX's self-reported peak (it undercounts ~40%).
+Add or update tests for every bug fix, feature, or behavior change. A bug fix needs a
+regression test that demonstrates the original failure; safety-critical changes need
+hardware-free boundary/refusal tests. Do not remove or weaken tests just to get green.
+
+Run the targeted tests while developing, then run:
+
+```bash
+uv run pytest -q
+uv run python -m compileall -q wmx_suite tests
+```
+
+Show the actual output before claiming success. Memory numbers especially: trust
+measured `os_wired` from `vm_stat`, not MLX's self-reported peak (it undercounts ~40%).

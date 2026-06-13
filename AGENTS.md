@@ -74,6 +74,34 @@ at non-trivial context.
 - Match **production inference settings** when measuring: `run` uses `--kv-bits 4` with
   `kv_group_size=64`, `quantized_kv_start=5000` — but only for quantizable models.
 
+## Testing requirements
+
+Tests are part of every behavior change, not follow-up work:
+
+- **Bug fixes require a regression test** that fails for the original bug and passes
+  with the fix.
+- **New features and changed behavior require tests** for the normal path, relevant
+  boundaries, and refusal/error behavior.
+- **Safety-critical changes** (`probe.py`, `launcher.py`, `probe_worker.py`, `system.py`,
+  model cache classification, or launch argument handling) require hardware-free unit
+  tests for the safety boundary. Never use a risky model run as the only proof.
+- Update existing tests when an intentional behavior change invalidates their
+  assumptions. Do not weaken or delete a test merely to make the suite pass.
+- If an automated test is genuinely impractical, explain why in the PR and provide a
+  deterministic manual verification procedure. This is an exception, not the default.
+
+Before declaring work complete, run:
+
+```bash
+uv run pytest -q
+uv run python -m compileall -q wmx_suite tests
+```
+
+Run the narrowest relevant test while developing, then run the full suite before
+commit/push. Tests must not load models, invoke MLX runtime allocation, probe live
+memory, or access the production database unless the test is explicitly designed and
+reviewed as an integration test.
+
 ## Architecture
 
 ```

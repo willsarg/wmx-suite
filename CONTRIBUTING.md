@@ -54,6 +54,7 @@ git clone https://github.com/willsarg/wmx-suite.git
 cd wmx-suite
 uv sync                      # creates .venv, installs in editable mode
 uv run wmx-suite system      # smoke test — prints your machine's wall + baseline
+uv run pytest -q             # hardware-free unit suite
 ```
 
 ## Project conventions
@@ -78,6 +79,14 @@ These are enforced — please follow them:
   you invest the work.
 - Run the actual commands and paste the output — especially memory numbers. Claims like
   "this is safe" need evidence (a `--dry-run` plan or a real `characterize` run).
+- Add or update tests for every bug fix, feature, or behavior change. Bug fixes need a
+  regression test for the original failure; safety-critical changes need boundary and
+  refusal-path coverage that does not depend on a risky model run.
+- Run the targeted tests during development, then run `uv run pytest -q` and
+  `uv run python -m compileall -q wmx_suite tests` before opening the PR.
+- If automated coverage is genuinely impractical, explain why and include deterministic
+  manual verification steps in the PR. "No tests needed" without an explanation is not
+  sufficient.
 - Match the surrounding code style: small, focused modules; comments that explain *why*,
   not *what*.
 

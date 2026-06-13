@@ -32,5 +32,14 @@ Related issue: <!-- e.g. Fixes #N -->
 
 <!-- Paste the commands you ran and their output. Memory claims need evidence. -->
 
+- [ ] I added or updated tests for each bug fix, feature, or behavior change.
+- [ ] Bug fixes include a regression test that covers the original failure.
+- [ ] Safety-critical changes include hardware-free boundary and refusal-path tests.
+- [ ] I ran the targeted tests for the changed behavior.
+- [ ] I ran `uv run pytest -q`.
+- [ ] I ran `uv run python -m compileall -q wmx_suite tests`.
+- [ ] If automated tests are impractical, I explained why and provided deterministic
+      manual verification steps below.
+
 ```
 ```
