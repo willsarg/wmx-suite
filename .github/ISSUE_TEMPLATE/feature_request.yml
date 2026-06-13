@@ -1,0 +1,30 @@
+name: "💡 Feature / idea"
+description: Suggest a capability or improvement.
+title: "[idea] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or idea
+      description: What are you trying to do, or what would make the suite better?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope
+      description: Roughly what would change. Keep it focused — small and shippable beats sprawling.
+    validations:
+      required: false
+  - type: dropdown
+    id: safety
+    attributes:
+      label: Does this touch a safety-critical path?
+      description: "i.e. probe.py, launcher.py, probe_worker.py, or system.py — anything affecting launch or memory prediction."
+      options:
+        - "No — doesn't affect launch or memory prediction"
+        - "Yes — touches probe/launch/memory logic"
+        - "Not sure"
+    validations:
+      required: true

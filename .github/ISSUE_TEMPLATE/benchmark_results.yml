@@ -1,0 +1,74 @@
+name: "📊 Benchmark results (Apple Silicon SKU)"
+description: Share memory-benchmark numbers from your Mac to help wmx-suite work beyond the reference M4 Pro.
+title: "[bench] <chip> <RAM>GB — "
+labels: ["benchmark", "calibration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping calibrate wmx-suite across the Apple Silicon lineup!
+        These are just **hardware capability numbers** — memory limits and per-model
+        curves. Please don't paste anything identifying (filenames, prompts, paths).
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options:
+        - M1
+        - M1 Pro
+        - M1 Max
+        - M1 Ultra
+        - M2
+        - M2 Pro
+        - M2 Max
+        - M2 Ultra
+        - M3
+        - M3 Pro
+        - M3 Max
+        - M3 Ultra
+        - M4
+        - M4 Pro
+        - M4 Max
+        - Other (note in description)
+    validations:
+      required: true
+  - type: input
+    id: ram
+    attributes:
+      label: RAM tier
+      placeholder: "e.g. 24 GB, 36 GB, 48 GB, 128 GB"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. 15.6"
+    validations:
+      required: false
+  - type: textarea
+    id: system-output
+    attributes:
+      label: "`wmx-suite system` output"
+      description: Paste the full output of `uv run wmx-suite system`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: characterize-output
+    attributes:
+      label: "`characterize` results"
+      description: >
+        For one or more `mlx-community` models, paste the fitted ceiling block from
+        `uv run wmx-suite characterize <hf_id>` (model id, model_base, slope, R², safe
+        ceiling, hard wall).
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-pii
+    attributes:
+      label: Confirmation
+      options:
+        - label: This contains only hardware/benchmark numbers — no filenames, prompts, paths, or other identifying info.
+          required: true

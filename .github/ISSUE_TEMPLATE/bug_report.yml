@@ -1,0 +1,46 @@
+name: "🐞 Bug report"
+description: Something didn't behave as expected (including a crash or near-crash).
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a **crash or near-crash**, please include your `wmx-suite system`
+        output and the launch plan (`--dry-run`) from before it happened — that's the
+        most useful thing for diagnosing a safety failure.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what actually occurred?
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: The exact `uv run wmx-suite ...` command.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Full output
+      description: Paste the complete output (and the `--dry-run` plan if relevant).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: "Chip + RAM, macOS version, Python version, and `mlx-lm` version."
+      placeholder: |
+        Chip/RAM: M4 Pro 24 GB
+        macOS: 15.6
+        Python: 3.12.x
+        mlx-lm: 0.31.x
+    validations:
+      required: true
