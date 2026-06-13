@@ -22,7 +22,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from . import db, models
+from . import config, db, models
 from .system import SystemLimits, read_limits, sample_settled_baseline
 
 DEFAULT_RAMP = [2048, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
@@ -113,10 +113,11 @@ def _measure_rung(py: str, hf_id: str, ctx: int, kv_bits, repeats: int, *, verbo
     }
 
 
-def characterize(hf_id: str, *, margin_gb: float = 2.0, ramp=None,
+def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
                  allow_min_probe: bool = False, repeats: int = DEFAULT_REPEATS,
                  worker_python: str | None = None, verbose=True) -> dict:
     ramp = ramp or DEFAULT_RAMP
+    margin_gb = config.margin_gb(margin_gb)
     limits = read_limits()
     threshold = limits.safe_threshold_gb(margin_gb)
     wall = limits.wall_gb

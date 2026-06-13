@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import db, models
+from . import config, db, models
 from .probe import FIXED_OVERHEAD_GB, RESIDENT_FACTOR
 from .system import read_limits, sample_settled_baseline
 
@@ -61,12 +61,13 @@ def predict(*, model_base_gb: float, slope_gb_per_k: float, live_base_gb: float,
                       breaches_wall=base_abs >= wall_gb, safe_ctx=cap)
 
 
-def plan(hf_id: str, *, margin_gb: float = 2.0) -> dict:
+def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
     """Decide kv_bits and a safe --max-kv-size for a launch, or refuse."""
     info = models.describe(hf_id)
     if info is None:
         return {"error": f"model not found in HF cache: {hf_id}"}
 
+    margin_gb = config.margin_gb(margin_gb)
     limits = read_limits()
     threshold = limits.safe_threshold_gb(margin_gb)
     wall = limits.wall_gb

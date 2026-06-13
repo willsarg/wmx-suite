@@ -11,6 +11,8 @@ import subprocess
 import time
 from dataclasses import dataclass
 
+from .config import DEFAULT_MARGIN_GB
+
 
 @dataclass(frozen=True)
 class SystemLimits:
@@ -21,7 +23,7 @@ class SystemLimits:
     swap_free_gb: float | None
     wired_now_gb: float      # OS-wired memory right now (baseline pressure)
 
-    def safe_threshold_gb(self, margin_gb: float = 2.0) -> float:
+    def safe_threshold_gb(self, margin_gb: float = DEFAULT_MARGIN_GB) -> float:
         """The line we never let predicted peak cross. Default keeps a 2 GB cushion."""
         return self.wall_gb - margin_gb
 

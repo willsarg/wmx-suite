@@ -213,6 +213,26 @@ def test_plan_omits_kv_quantization_for_rotating_cache(monkeypatch):
     assert launcher.plan("mlx-community/test")["kv_bits"] is None
 
 
+def test_plan_uses_environment_margin_by_default(monkeypatch):
+    monkeypatch.setenv("WMX_SUITE_MARGIN_GB", "3")
+    _install_plan_fakes(
+        monkeypatch,
+        info=_model_info(),
+        fit={"model_base_gb": 8.0, "slope_gb_per_k": 0.1},
+    )
+    assert launcher.plan("mlx-community/test")["threshold_gb"] == 14.0
+
+
+def test_plan_explicit_margin_overrides_environment(monkeypatch):
+    monkeypatch.setenv("WMX_SUITE_MARGIN_GB", "3")
+    _install_plan_fakes(
+        monkeypatch,
+        info=_model_info(),
+        fit={"model_base_gb": 8.0, "slope_gb_per_k": 0.1},
+    )
+    assert launcher.plan("mlx-community/test", margin_gb=1.0)["threshold_gb"] == 16.0
+
+
 @pytest.mark.parametrize("args", [["--model", "x"], ["--model=x"]])
 def test_build_argv_injects_planned_values(args):
     result = launcher.build_argv(args, _plan_dict(), force=False)

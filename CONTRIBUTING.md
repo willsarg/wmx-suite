@@ -66,6 +66,8 @@ These are enforced — please follow them:
 - Stick to **`mlx-community`** models for measurements and examples.
 - SQLite is the datastore (`data/suite.db`, gitignored). Flask is an optional extra
   (`web`) — only add UI code if the change calls for it.
+- The default 2 GB safety cushion can be configured with `WMX_SUITE_MARGIN_GB`;
+  command-level `--margin` values take precedence.
 - When measuring, **match production inference settings**: `--kv-bits 4` with
   `kv_group_size=64`, `quantized_kv_start=5000`, but **only for quantizable caches**.
   RotatingKVCache models (Gemma, GPT-OSS) must run fp16 — quantizing them crashes past

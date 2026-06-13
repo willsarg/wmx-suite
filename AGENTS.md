@@ -71,6 +71,9 @@ at non-trivial context.
 - Stick to **`mlx-community`** models.
 - SQLite is the datastore (`data/suite.db`, gitignored). Flask is optional (`web` extra),
   only add a UI if asked.
+- The global safety margin defaults to 2 GB and can be set with
+  `WMX_SUITE_MARGIN_GB`; an explicit `--margin` takes precedence. Reject negative,
+  NaN, or infinite values.
 - Match **production inference settings** when measuring: `run` uses `--kv-bits 4` with
   `kv_group_size=64`, `quantized_kv_start=5000` — but only for quantizable models.
 
@@ -106,6 +109,7 @@ reviewed as an integration test.
 
 ```
 wmx_suite/
+  config.py         # validated runtime defaults (for example WMX_SUITE_MARGIN_GB)
   system.py         # device wall, swap, current wired memory
   models.py         # HF-cache config reader + memory-class classifier
   db.py             # SQLite schema: models, probe_runs, measurements, fits, generation_log

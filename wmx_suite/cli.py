@@ -21,12 +21,20 @@ import sys
 import termios
 from statistics import median
 
-from . import db, launcher, models, probe
+from . import config, db, launcher, models, probe
 from .system import read_limits, sample_settled_baseline
+
+
+def _configured_margin(value=None) -> float:
+    try:
+        return config.margin_gb(value)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def cmd_system(_):
     s = read_limits()
+    margin = _configured_margin()
     print(f"device              : {s.device}")
     print(f"total RAM           : {s.total_gb:.2f} GB")
     print(f"crash wall          : {s.wall_gb:.2f} GB  (max_recommended_working_set_size)")
@@ -34,7 +42,8 @@ def cmd_system(_):
     print(f"swap free           : {s.swap_free_gb:.2f} GB" if s.swap_free_gb is not None
           else "swap free           : unknown")
     print(f"wired now (baseline): {s.wired_now_gb:.2f} GB")
-    print(f"safe threshold (2GB): {s.safe_threshold_gb():.2f} GB")
+    print(f"safe threshold       : {s.safe_threshold_gb(margin):.2f} GB  "
+          f"(wall − {margin:g}GB margin)")
 
 
 def cmd_health(args):
@@ -45,13 +54,14 @@ def cmd_health(args):
         codes = {"green": "32", "red": "31", "yellow": "33"}
         return f"\033[{codes[name]}m{text}\033[0m" if color else text
 
+    margin = _configured_margin(args.margin)
     s = read_limits()
-    threshold = s.safe_threshold_gb(args.margin)
+    threshold = s.safe_threshold_gb(margin)
     live_base = sample_settled_baseline()  # same baseline `run` uses, sampled once
 
     print(f"device              : {s.device}")
     print(f"crash wall          : {s.wall_gb:.2f} GB")
-    print(f"safe threshold      : {threshold:.2f} GB  (wall − {args.margin:g}GB margin)")
+    print(f"safe threshold      : {threshold:.2f} GB  (wall − {margin:g}GB margin)")
     if s.swap_free_gb is None:
         print("swap free           : unknown")
     elif s.swap_free_gb < 2.0:
@@ -124,7 +134,8 @@ def cmd_show(args):
 
 
 def cmd_characterize(args):
-    probe.characterize(args.hf_id, margin_gb=args.margin, allow_min_probe=args.min_probe,
+    margin = _configured_margin(args.margin)
+    probe.characterize(args.hf_id, margin_gb=margin, allow_min_probe=args.min_probe,
                        repeats=args.repeats)
 
 
@@ -156,7 +167,7 @@ Safely launch mlx_lm.generate. Picks kv-bits by cache type, caps --max-kv-size f
 measured ceiling, and refuses if the run would breach the wall.
 The passthrough args must include --model <hf_id>.
 
-  --margin GB   safety cushion under the wall (default 2.0)
+  --margin GB   safety cushion under the wall (default: WMX_SUITE_MARGIN_GB or 2.0)
   --force       launch even if the planner refuses (may crash the machine)
   --dry-run     print the plan, do not launch
   --no-log      do not record generation speed (bare exec passthrough)
@@ -233,14 +244,18 @@ def cmd_run_raw(run_args: list[str]):
     Done manually (not argparse) because argparse.REMAINDER mishandles optionals that
     precede the positional, and we want `run --model X ...` to work as a drop-in.
     """
-    margin, force, dry, log = 2.0, False, False, True
+    margin, force, dry, log = None, False, False, True
     i = 0
     while i < len(run_args):
         a = run_args[i]
         if a in ("-h", "--help"):
             print(RUN_HELP); return
         if a == "--margin":
-            margin = float(run_args[i + 1]); i += 2; continue
+            if i + 1 >= len(run_args):
+                raise SystemExit("[run] --margin requires a value")
+            margin = run_args[i + 1]; i += 2; continue
+        if a.startswith("--margin="):
+            margin = a.split("=", 1)[1]; i += 1; continue
         if a == "--force":
             force = True; i += 1; continue
         if a == "--dry-run":
@@ -254,7 +269,8 @@ def cmd_run_raw(run_args: list[str]):
     _run(rest, margin=margin, force=force, dry_run=dry, log=log)
 
 
-def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool, log: bool = True):
+def _run(rest: list[str], *, margin: float | str | None, force: bool,
+         dry_run: bool, log: bool = True):
     """Crash-safe launch: plan a launch, then exec mlx_lm.generate."""
     model_id = None
     for i, a in enumerate(rest):
@@ -267,7 +283,8 @@ def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool, log: boo
     if model_id is None:
         raise SystemExit("[run] --model is required")
 
-    p = launcher.plan(model_id, margin_gb=margin)
+    margin_gb = _configured_margin(margin)
+    p = launcher.plan(model_id, margin_gb=margin_gb)
     if p.get("error"):
         raise SystemExit(f"[run] {p['error']}")
 
@@ -306,12 +323,15 @@ def _main_argparse():
     ap = argparse.ArgumentParser(prog="wmx-suite")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("system").set_defaults(func=cmd_system)
-    p = sub.add_parser("health"); p.add_argument("--margin", type=float, default=2.0)
+    p = sub.add_parser("health")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
     p.set_defaults(func=cmd_health)
     sub.add_parser("scan").set_defaults(func=cmd_scan)
     p = sub.add_parser("show"); p.add_argument("hf_id"); p.set_defaults(func=cmd_show)
     p = sub.add_parser("characterize"); p.add_argument("hf_id")
-    p.add_argument("--margin", type=float, default=2.0)
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
     p.add_argument("--min-probe", action="store_true",
                    help="for borderline models, run a supervised 512-token probe to measure "
                         "the true base instead of refusing on the pessimistic estimate")

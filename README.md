@@ -54,6 +54,19 @@ uv sync                          # install deps into .venv
 uv run wmx-suite system          # show the machine's wall, swap, baseline
 ```
 
+The default safety cushion is 2 GB below the machine's wired-memory wall. Set
+`WMX_SUITE_MARGIN_GB` to change it globally for `system`, `health`, `characterize`, and
+`run`; an explicit `--margin` on a command takes precedence:
+
+```bash
+export WMX_SUITE_MARGIN_GB=3
+uv run wmx-suite health
+uv run wmx-suite run --margin 2.5 --dry-run --model <hf_id> --prompt "..."
+```
+
+The margin must be finite and non-negative. Lower margins reduce the safety cushion;
+use them only when you understand the hard-lock risk.
+
 | Command | What it does |
 |---|---|
 | `uv run wmx-suite system` | Show the machine's wall, swap, baseline |
@@ -100,6 +113,7 @@ then shows the median gen speed per model. Pass `--no-log` for a bare passthroug
 
 ```
 wmx_suite/
+  config.py         # validated runtime defaults (for example WMX_SUITE_MARGIN_GB)
   system.py         # device wall, swap, current wired memory
   models.py         # HF-cache config reader + memory-class classifier
   db.py             # SQLite schema: models, probe_runs, measurements, fits, generation_log
