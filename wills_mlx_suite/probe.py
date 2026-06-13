@@ -17,15 +17,17 @@ Strategy:
 from __future__ import annotations
 
 import json
+import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
 
 from . import db, models
-from .system import SystemLimits, read_limits, wired_gb
+from .system import SystemLimits, read_limits, sample_settled_baseline
 
 DEFAULT_RAMP = [2048, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
 MIN_PROBE_CTX = 512  # supervised calibration probe — deep in the safe zone
+DEFAULT_REPEATS = 3  # N-repeat median per rung, to smooth prefill-transient sampling jitter
 # rough base-footprint estimate (GB): weights resident + fixed overhead, on top of the
 # live system baseline. Calibrated loosely on Gemma/Qwen; refined as more models run.
 RESIDENT_FACTOR = 1.05
@@ -87,9 +89,33 @@ def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, *, verbose, log) -> dict
     return json.loads(line)
 
 
+def _measure_rung(py: str, hf_id: str, ctx: int, kv_bits, repeats: int, *, verbose, log):
+    """Run a rung `repeats` times in fresh processes; return the MEDIAN high-water.
+
+    Each prefill can land its peak between sampler windows (±~1GB jitter), so a single run
+    makes ceilings look erratic. The median of N isolated runs is the textbook smoother.
+    Returns a dict with median os_wired/delta/mlx_peak, or the first failure dict / None.
+    """
+    abss, deltas, peaks = [], [], []
+    for _ in range(max(1, repeats)):
+        m = _run_worker(py, hf_id, ctx, kv_bits, verbose=verbose, log=log)
+        if m is None or m.get("status") != "ok":
+            return m  # propagate error/None — stop the ramp
+        abss.append(m["os_wired_gb"])
+        deltas.append(m["os_wired_gb"] - m["baseline_wired_gb"])
+        peaks.append(m["mlx_peak_gb"])
+    return {
+        "status": "ok", "context": ctx, "repeats": len(abss),
+        "os_wired_gb": round(statistics.median(abss), 3),
+        "delta": round(statistics.median(deltas), 3),
+        "mlx_peak_gb": round(statistics.median(peaks), 3),
+        "spread_gb": round(max(abss) - min(abss), 3),
+    }
+
+
 def characterize(hf_id: str, *, margin_gb: float = 2.0, ramp=None,
-                 allow_min_probe: bool = False, worker_python: str | None = None,
-                 verbose=True) -> dict:
+                 allow_min_probe: bool = False, repeats: int = DEFAULT_REPEATS,
+                 worker_python: str | None = None, verbose=True) -> dict:
     ramp = ramp or DEFAULT_RAMP
     limits = read_limits()
     threshold = limits.safe_threshold_gb(margin_gb)
@@ -116,7 +142,7 @@ def characterize(hf_id: str, *, margin_gb: float = 2.0, ramp=None,
 
     log(f"# {hf_id}")
     log(f"# wall={wall:.2f}GB  safe_threshold={threshold:.2f}GB  baseline={sweep_baseline:.2f}GB  "
-        f"kv_bits={kv_bits}  cache={info.cache_type}")
+        f"kv_bits={kv_bits}  cache={info.cache_type}  repeats={repeats}")
 
     xs_k: list[float] = []   # context in thousands of tokens
     ys: list[float] = []     # DELTA over launch baseline (model's own footprint)
@@ -181,9 +207,10 @@ def characterize(hf_id: str, *, margin_gb: float = 2.0, ramp=None,
             break
         if xs_k and ctx <= xs_k[-1] * 1000:
             continue  # already covered by the min-probe seed
-        # predict this rung against the LIVE baseline before launching it
+        # predict this rung against a SETTLED live baseline before launching it
+        # (settle neutralizes un-reclaimed wired pages from the just-exited worker)
         if fit is not None:
-            live_base = wired_gb()
+            live_base = sample_settled_baseline()
             pred = live_base + fit.model_base_gb + fit.slope_gb_per_k * (ctx / 1000)
             if pred >= threshold:
                 log(f"# STOP before {ctx}: predicted {pred:.2f}GB "
@@ -192,7 +219,7 @@ def characterize(hf_id: str, *, margin_gb: float = 2.0, ramp=None,
                     f"Ceiling reached safely.")
                 break
 
-        m = _run_worker(py, hf_id, ctx, kv_bits, verbose=verbose, log=log)
+        m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None:
             db.add_measurement(con, run_id, ctx, status="error", note="no json output")
             break
@@ -201,14 +228,15 @@ def characterize(hf_id: str, *, margin_gb: float = 2.0, ramp=None,
             db.add_measurement(con, run_id, ctx, status=m.get("status"), note=m.get("note"))
             break  # a crash/NYI here means production can't go here either
 
-        delta = round(m["os_wired_gb"] - m["baseline_wired_gb"], 3)
+        delta = m["delta"]
         db.add_measurement(con, run_id, ctx, mlx_peak_gb=m["mlx_peak_gb"],
-                           mlx_true_gb=m["mlx_true_gb"], os_wired_gb=m["os_wired_gb"],
-                           note=f"delta={delta}")
+                           os_wired_gb=m["os_wired_gb"],
+                           note=f"median of {m['repeats']}; delta={delta}; spread={m['spread_gb']}")
         xs_k.append(ctx / 1000)
         ys.append(delta)
         log(f"{ctx:>8}  os_wired={m['os_wired_gb']:.2f}GB  delta={delta:.2f}GB  "
-            f"mlx_peak={m['mlx_peak_gb']:.2f}GB")
+            f"mlx_peak={m['mlx_peak_gb']:.2f}GB  (median of {m['repeats']}, "
+            f"spread {m['spread_gb']:.2f}GB)")
         _refit()
 
     result = {"hf_id": hf_id, "refused": False, "run_id": run_id,

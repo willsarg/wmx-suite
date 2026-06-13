@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 
 
@@ -62,6 +63,21 @@ def wired_gb() -> float:
         if "Pages wired down" in line:
             wired_pages = int(line.split()[-1].strip("."))
     return wired_pages * page_size / 1e9
+
+
+def sample_settled_baseline(settle: float = 0.5, n: int = 3, interval: float = 0.2) -> float:
+    """OS-wired baseline after letting IOGPU settle, taking the MIN of several samples.
+
+    When a Metal worker subprocess exits, macOS does not un-wire its pages synchronously —
+    sampling immediately catches an artificially high reading and forces an over-conservative
+    early stop. A short settle plus a min-of-samples reads the reclaimed floor instead.
+    """
+    time.sleep(settle)
+    samples = [wired_gb()]
+    for _ in range(max(1, n) - 1):
+        time.sleep(interval)
+        samples.append(wired_gb())
+    return min(samples)
 
 
 def read_limits() -> SystemLimits:

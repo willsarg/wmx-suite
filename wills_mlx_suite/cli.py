@@ -53,7 +53,8 @@ def cmd_show(args):
 
 
 def cmd_characterize(args):
-    probe.characterize(args.hf_id, margin_gb=args.margin, allow_min_probe=args.min_probe)
+    probe.characterize(args.hf_id, margin_gb=args.margin, allow_min_probe=args.min_probe,
+                       repeats=args.repeats)
 
 
 def cmd_list(_):
@@ -84,6 +85,9 @@ def main():
     p.add_argument("--min-probe", action="store_true",
                    help="for borderline models, run a supervised 512-token probe to measure "
                         "the true base instead of refusing on the pessimistic estimate")
+    p.add_argument("--repeats", type=int, default=probe.DEFAULT_REPEATS,
+                   help="isolated runs per context rung; the median high-water is used "
+                        "(smooths prefill-transient jitter)")
     p.set_defaults(func=cmd_characterize)
     sub.add_parser("list").set_defaults(func=cmd_list)
     args = ap.parse_args()
