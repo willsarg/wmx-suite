@@ -57,3 +57,26 @@ def test_run_passes_force_to_argument_validation(monkeypatch):
     )
 
     assert seen["force"] is True
+
+
+def test_run_accepts_equals_form_model_argument(monkeypatch):
+    seen = {}
+
+    def plan(model_id, *, margin_gb):
+        seen["model_id"] = model_id
+        return _plan()
+
+    monkeypatch.setattr(cli.launcher, "plan", plan)
+    monkeypatch.setattr(
+        cli.launcher,
+        "build_argv",
+        lambda rest, plan, *, force: rest,
+    )
+    cli._run(
+        ["--model=mlx-community/test"],
+        margin=2.0,
+        force=False,
+        dry_run=True,
+    )
+
+    assert seen["model_id"] == "mlx-community/test"

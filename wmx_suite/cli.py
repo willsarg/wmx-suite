@@ -261,6 +261,9 @@ def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool, log: boo
         if a == "--model" and i + 1 < len(rest):
             model_id = rest[i + 1]
             break
+        if a.startswith("--model="):
+            model_id = a.split("=", 1)[1]
+            break
     if model_id is None:
         raise SystemExit("[run] --model is required")
 

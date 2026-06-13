@@ -37,7 +37,12 @@ def _install_plan_fakes(monkeypatch, *, info, fit, live_base=3.0):
 
 
 def _plan_dict(*, kv_bits=4, max_kv_size=4096):
-    return {"kv_bits": kv_bits, "max_kv_size": max_kv_size}
+    return {
+        "kv_bits": kv_bits,
+        "kv_group_size": launcher.KV_GROUP_SIZE,
+        "quantized_kv_start": launcher.QUANTIZED_KV_START,
+        "max_kv_size": max_kv_size,
+    }
 
 
 def test_predict_calculates_base_headroom_and_context():
@@ -96,7 +101,8 @@ def test_predict_nonpositive_slope_with_exhausted_headroom_is_zero(slope):
 
 
 @pytest.mark.parametrize("slope", [0.0, -0.1])
-def test_predict_nonpositive_slope_with_headroom_uses_model_max(slope):
+def test_predict_nonpositive_slope_with_headroom_is_zero(slope):
+    # A non-growing curve is not defensible evidence for granting maximum context.
     result = launcher.predict(
         model_base_gb=8.0,
         slope_gb_per_k=slope,
@@ -105,7 +111,7 @@ def test_predict_nonpositive_slope_with_headroom_uses_model_max(slope):
         wall_gb=17.0,
         model_max=32768,
     )
-    assert result.safe_ctx == 32768
+    assert result.safe_ctx == 0
 
 
 def test_estimated_slope_converts_units_and_applies_prefill_multiplier():
@@ -188,6 +194,16 @@ def test_plan_uses_estimate_for_uncharacterized_model(monkeypatch):
     )
 
 
+def test_plan_refuses_when_estimated_slope_is_unavailable(monkeypatch):
+    info = _model_info()
+    info.kv_heads = None
+    _install_plan_fakes(monkeypatch, info=info, fit=None)
+    result = launcher.plan("mlx-community/test")
+    assert result["source"] == "estimated"
+    assert result["refuse"] is True
+    assert result["max_kv_size"] == 0
+
+
 def test_plan_omits_kv_quantization_for_rotating_cache(monkeypatch):
     _install_plan_fakes(
         monkeypatch,
@@ -200,7 +216,16 @@ def test_plan_omits_kv_quantization_for_rotating_cache(monkeypatch):
 @pytest.mark.parametrize("args", [["--model", "x"], ["--model=x"]])
 def test_build_argv_injects_planned_values(args):
     result = launcher.build_argv(args, _plan_dict(), force=False)
-    assert result[:4] == ["--max-kv-size", "4096", "--kv-bits", "4"]
+    assert result[:8] == [
+        "--max-kv-size",
+        "4096",
+        "--quantized-kv-start",
+        "5000",
+        "--kv-group-size",
+        "64",
+        "--kv-bits",
+        "4",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -222,9 +247,50 @@ def test_build_argv_preserves_context_at_or_below_plan(args):
         ["--model=x", "--kv-bits=8"],
     ],
 )
-def test_build_argv_preserves_explicit_kv_bits_for_quantizable_cache(args):
-    result = launcher.build_argv(args, _plan_dict(), force=False)
+def test_build_argv_rejects_uncharacterized_kv_bits_without_force(args):
+    with pytest.raises(launcher.LaunchArgumentError, match="characterized setting"):
+        launcher.build_argv(args, _plan_dict(), force=False)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--model", "x", "--kv-bits", "8"],
+        ["--model=x", "--kv-bits=8"],
+    ],
+)
+def test_build_argv_preserves_uncharacterized_kv_bits_with_force(args):
+    result = launcher.build_argv(args, _plan_dict(), force=True)
     assert "--kv-bits=8" in result or result[-2:] == ["--kv-bits", "8"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--model", "x", "--kv-group-size", "32"],
+        ["--model=x", "--kv-group-size=32"],
+        ["--model", "x", "--quantized-kv-start", "0"],
+        ["--model=x", "--quantized-kv-start=0"],
+    ],
+)
+def test_build_argv_rejects_uncharacterized_kv_settings_without_force(args):
+    with pytest.raises(launcher.LaunchArgumentError, match="characterized setting"):
+        launcher.build_argv(args, _plan_dict(), force=False)
+
+
+def test_build_argv_preserves_matching_explicit_kv_settings():
+    args = [
+        "--model",
+        "x",
+        "--kv-bits",
+        "4",
+        "--kv-group-size",
+        "64",
+        "--quantized-kv-start",
+        "5000",
+    ]
+    result = launcher.build_argv(args, _plan_dict(), force=False)
+    assert result == ["--max-kv-size", "4096", *args]
 
 
 @pytest.mark.parametrize(
@@ -242,6 +308,10 @@ def test_build_argv_rejects_context_above_plan_without_force(args):
 def test_build_argv_preserves_context_above_plan_with_force():
     args = ["--model", "x", "--max-kv-size", "8192"]
     assert launcher.build_argv(args, _plan_dict(), force=True) == [
+        "--quantized-kv-start",
+        "5000",
+        "--kv-group-size",
+        "64",
         "--kv-bits",
         "4",
         *args,
@@ -279,8 +349,32 @@ def test_build_argv_rejects_invalid_or_duplicate_kv_bits(args):
 @pytest.mark.parametrize(
     "args",
     [
+        ["--model", "x", "--kv-group-size"],
+        ["--model", "x", "--kv-group-size=bad"],
+        ["--model", "x", "--kv-group-size", "64", "--kv-group-size=32"],
+        ["--model", "x", "--quantized-kv-start"],
+        ["--model", "x", "--quantized-kv-start=bad"],
+        [
+            "--model",
+            "x",
+            "--quantized-kv-start",
+            "5000",
+            "--quantized-kv-start=0",
+        ],
+    ],
+)
+def test_build_argv_rejects_invalid_or_duplicate_kv_settings(args):
+    with pytest.raises(launcher.LaunchArgumentError):
+        launcher.build_argv(args, _plan_dict(), force=False)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
         ["--model", "x", "--kv-bits", "4"],
         ["--model=x", "--kv-bits=4"],
+        ["--model", "x", "--kv-group-size", "64"],
+        ["--model=x", "--quantized-kv-start=5000"],
     ],
 )
 def test_build_argv_rejects_kv_quantization_for_rotating_cache_even_with_force(args):

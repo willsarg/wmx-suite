@@ -20,6 +20,9 @@ from .system import read_limits, sample_settled_baseline
 # models we apply this multiplier so the estimated cap stays conservative.
 PREFILL_SPIKE_MULT = 5.0
 MIN_USEFUL_CTX = 512
+KV_BITS = 4
+KV_GROUP_SIZE = 64
+QUANTIZED_KV_START = 5000
 
 
 def _estimated_slope_gb_per_k(info: models.ModelInfo) -> float:
@@ -51,7 +54,7 @@ def predict(*, model_base_gb: float, slope_gb_per_k: float, live_base_gb: float,
     elif slope_gb_per_k > 0:
         cap = int(headroom / slope_gb_per_k * 1000)
     else:
-        cap = model_max or 0
+        cap = 0
     if model_max:
         cap = min(cap, model_max)
     return Prediction(base_abs_gb=base_abs, headroom_gb=headroom,
@@ -68,7 +71,7 @@ def plan(hf_id: str, *, margin_gb: float = 2.0) -> dict:
     threshold = limits.safe_threshold_gb(margin_gb)
     wall = limits.wall_gb
     live_base = sample_settled_baseline()
-    kv_bits = 4 if info.can_quantize_kv else None  # fix #1: quantize only quantizable caches
+    kv_bits = KV_BITS if info.can_quantize_kv else None
 
     con = db.connect()
     fit = db.latest_fit(con, hf_id)
@@ -85,6 +88,7 @@ def plan(hf_id: str, *, margin_gb: float = 2.0) -> dict:
                    threshold_gb=threshold, wall_gb=wall, model_max=info.max_context)
     p = {
         "hf_id": hf_id, "kv_bits": kv_bits, "source": source,
+        "kv_group_size": KV_GROUP_SIZE, "quantized_kv_start": QUANTIZED_KV_START,
         "cache_type": info.cache_type, "model_max": info.max_context,
         "live_base_gb": round(live_base, 2), "model_base_gb": round(model_base, 2),
         "base_abs_gb": round(pred.base_abs_gb, 2), "slope_gb_per_k": round(slope, 5),
@@ -146,12 +150,35 @@ def build_argv(rest: list[str], p: dict, *, force: bool = False) -> list[str]:
     """Validate safety-sensitive passthrough args and inject planned defaults."""
     argv = list(rest)
     user_kv_bits = _single_int_option(argv, "--kv-bits")
+    user_kv_group_size = _single_int_option(argv, "--kv-group-size")
+    user_quantized_kv_start = _single_int_option(argv, "--quantized-kv-start")
     user_max_kv = _single_int_option(argv, "--max-kv-size")
 
-    if p["kv_bits"] is None and user_kv_bits is not None:
-        raise LaunchArgumentError(
-            "--kv-bits is not supported because this model's cache is not quantizable"
-        )
+    kv_options = {
+        "--kv-bits": user_kv_bits,
+        "--kv-group-size": user_kv_group_size,
+        "--quantized-kv-start": user_quantized_kv_start,
+    }
+    if p["kv_bits"] is None:
+        supplied = [option for option, value in kv_options.items() if value is not None]
+        if supplied:
+            raise LaunchArgumentError(
+                f"{', '.join(supplied)} not supported because this model's cache "
+                "is not quantizable"
+            )
+    elif not force:
+        expected = {
+            "--kv-bits": p["kv_bits"],
+            "--kv-group-size": p["kv_group_size"],
+            "--quantized-kv-start": p["quantized_kv_start"],
+        }
+        for option, value in kv_options.items():
+            if value is not None and value != expected[option]:
+                raise LaunchArgumentError(
+                    f"{option} {value} does not match characterized setting "
+                    f"{expected[option]}; pass --force to override"
+                )
+
     if user_max_kv is not None and user_max_kv > p["max_kv_size"] and not force:
         raise LaunchArgumentError(
             f"--max-kv-size {user_max_kv:,} exceeds planned cap "
@@ -166,6 +193,10 @@ def build_argv(rest: list[str], p: dict, *, force: bool = False) -> list[str]:
 
     if p["kv_bits"] is not None and user_kv_bits is None:
         argv = ["--kv-bits", str(p["kv_bits"])] + argv
+    if p["kv_bits"] is not None and user_kv_group_size is None:
+        argv = ["--kv-group-size", str(p["kv_group_size"])] + argv
+    if p["kv_bits"] is not None and user_quantized_kv_start is None:
+        argv = ["--quantized-kv-start", str(p["quantized_kv_start"])] + argv
     if user_max_kv is None:
         argv = ["--max-kv-size", str(p["max_kv_size"])] + argv
     return argv
