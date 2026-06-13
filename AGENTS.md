@@ -56,12 +56,12 @@ uv run wmx-suite list                     # ceilings from the DB
 uv run wmx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
 ```
 
-**`run` is the only sanctioned way to launch a model.** It replaced the old standalone
-`~/bin/mlx_safe` (now deleted — all logic lives in `launcher.py`). It picks `--kv-bits` by
-cache type (omits it for RotatingKVCache models that can't quantize), caps `--max-kv-size`
-from the measured ceiling against the live baseline, and refuses if the model would breach
-the wall on load. Use `--dry-run` to inspect the plan; `--force` overrides a refusal at
-the user's own risk. Never call `mlx_lm.generate` directly at non-trivial context.
+**`run` is the only sanctioned way to launch a model** (all logic lives in `launcher.py`).
+It picks `--kv-bits` by cache type (omits it for RotatingKVCache models that can't
+quantize), caps `--max-kv-size` from the measured ceiling against the live baseline, and
+refuses if the model would breach the wall on load. Use `--dry-run` to inspect the plan;
+`--force` overrides a refusal at the user's own risk. Never call `mlx_lm.generate` directly
+at non-trivial context.
 
 ## Conventions (Will's global prefs — enforce them)
 
@@ -70,8 +70,8 @@ the user's own risk. Never call `mlx_lm.generate` directly at non-trivial contex
 - Stick to **`mlx-community`** models.
 - SQLite is the datastore (`data/suite.db`, gitignored). Flask is optional (`web` extra),
   only add a UI if asked.
-- Match **production inference settings** when measuring: `mlx_safe` forces `--kv-bits 4`
-  with `kv_group_size=64`, `quantized_kv_start=5000` — but only for quantizable models.
+- Match **production inference settings** when measuring: `run` uses `--kv-bits 4` with
+  `kv_group_size=64`, `quantized_kv_start=5000` — but only for quantizable models.
 
 ## Architecture
 

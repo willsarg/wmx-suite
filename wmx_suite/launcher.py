@@ -1,12 +1,11 @@
-"""Safe launch planning for mlx_lm.generate — the brains of the old `mlx_safe`, fixed.
+"""Safe launch planning for mlx_lm.generate.
 
-Replaces the standalone ~/bin/mlx_safe wrapper. Two bugs it had:
-  1. It forced `--kv-bits 4` on every model, crashing RotatingKVCache models (Gemma,
-     GPT-OSS) past 5000 tokens. We now quantize ONLY models whose cache supports it.
-  2. It budgeted `total_RAM - weights*1.2 - OS_reserve` against TOTAL RAM, ignoring the
-     real wired wall (17.18 GB) and the prefill spike. We now budget against the measured
-     per-model curve and the live system baseline, refusing to launch if the model can't
-     even load without breaching the wall.
+Two failure modes a naive launcher hits, and how we avoid them:
+  1. Forcing `--kv-bits 4` on every model crashes RotatingKVCache models (Gemma,
+     GPT-OSS) past 5000 tokens. We quantize ONLY models whose cache supports it.
+  2. Budgeting against TOTAL RAM ignores the real wired wall (17.18 GB) and the prefill
+     spike. We budget against the measured per-model curve and the live system baseline,
+     refusing to launch if the model can't even load without breaching the wall.
 """
 from __future__ import annotations
 

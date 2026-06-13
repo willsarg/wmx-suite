@@ -78,8 +78,8 @@ def cmd_list(_):
 
 RUN_HELP = """usage: wmx-suite run [--margin GB] [--force] [--dry-run] -- <mlx_lm.generate args>
 
-Safely launch mlx_lm.generate (replaces the old mlx_safe). Picks kv-bits by cache type,
-caps --max-kv-size from the measured ceiling, and refuses if the run would breach the wall.
+Safely launch mlx_lm.generate. Picks kv-bits by cache type, caps --max-kv-size from the
+measured ceiling, and refuses if the run would breach the wall.
 The passthrough args must include --model <hf_id>.
 
   --margin GB   safety cushion under the wall (default 2.0)
@@ -114,7 +114,7 @@ def cmd_run_raw(run_args: list[str]):
 
 
 def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool):
-    """Safe replacement for the old mlx_safe: plan a launch, then exec mlx_lm.generate."""
+    """Crash-safe launch: plan a launch, then exec mlx_lm.generate."""
     model_id = None
     for i, a in enumerate(rest):
         if a == "--model" and i + 1 < len(rest):
@@ -170,9 +170,9 @@ def _main_argparse():
     sub.add_parser("list").set_defaults(func=cmd_list)
     # `run` is intercepted before argparse (see below) so it can pass arbitrary flags
     # through to mlx_lm.generate; this stub only makes it show up in `--help`.
-    sub.add_parser("run", help="safely launch mlx_lm.generate (replaces mlx_safe): picks "
-                               "kv-bits by cache type, caps --max-kv-size from the measured "
-                               "ceiling, refuses if it would breach the wall")
+    sub.add_parser("run", help="safely launch mlx_lm.generate: picks kv-bits by cache "
+                               "type, caps --max-kv-size from the measured ceiling, "
+                               "refuses if it would breach the wall")
     args = ap.parse_args()
     args.func(args)
 

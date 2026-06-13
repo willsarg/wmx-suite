@@ -34,7 +34,7 @@ class ModelInfo:
     hidden_size: int | None
     max_context: int | None
     cache_type: str              # "RotatingKVCache" | "standard"
-    can_quantize_kv: bool        # False => must run fp16 KV (mlx_safe must NOT pass --kv-bits 4)
+    can_quantize_kv: bool        # False => must run fp16 KV (do NOT pass --kv-bits 4)
     layer_types: dict
 
     def fp16_kv_bytes_per_token(self) -> float:

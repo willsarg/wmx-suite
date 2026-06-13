@@ -38,14 +38,14 @@ uv run wmx-suite scan                     # register mlx-community models from t
 uv run wmx-suite show <hf_id>             # architecture + memory class
 uv run wmx-suite characterize <hf_id>     # safe probe -> fitted context ceiling
 uv run wmx-suite list                     # ceilings for everything characterized
-uv run wmx-suite run --model <hf_id> ...  # safely launch mlx_lm.generate (replaces mlx_safe)
+uv run wmx-suite run --model <hf_id> ...  # safely launch mlx_lm.generate
 ```
 
 `characterize` refuses to launch any probe whose pre-flight base estimate already
 exceeds the safe threshold (this is how oversized models like the 27B are handled —
 predicted, never run into the wall).
 
-### `run` — the safe launcher (replaces the old `~/bin/mlx_safe`)
+### `run` — the safe launcher
 
 `run` plans a launch and then execs `mlx_lm.generate`. It:
 
