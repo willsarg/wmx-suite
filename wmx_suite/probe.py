@@ -312,6 +312,9 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
             f"pass a smaller --model."
         )
 
+    factor, overhead, _ = profiles.cold_start_constants(con)
+    model_base = info.weights_gb * factor + overhead
+
     log(f"# calibrate {hf_id}  weights={info.weights_gb}GB  "
         f"threshold={threshold:.2f}GB  kv_bits={kv_bits}")
 
@@ -320,6 +323,13 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
     for ctx in CALIBRATE_RAMP:
         if ctx > (info.max_context or ctx):
             continue
+        live_base = sample_settled_baseline()
+        if live_base + model_base >= threshold:
+            raise SystemExit(
+                f"[calibrate] live baseline {live_base:.2f}GB + model {model_base:.2f}GB "
+                f">= threshold {threshold:.2f}GB before rung {ctx}; aborting "
+                f"(machine got busier — free memory and retry)."
+            )
         m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None or m.get("status") != "ok":
             note = (m or {}).get("note", "no output")

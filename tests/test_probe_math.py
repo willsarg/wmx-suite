@@ -132,6 +132,7 @@ def test_calibrate_solves_and_floors_overhead(monkeypatch, tmp_path):
     info = _model_info(weights_gb=0.5, is_causal=True, can_quantize_kv=True, max_context=32768)
     monkeypatch.setattr(models, "describe", lambda hf_id: info)
     monkeypatch.setattr(probe, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+    monkeypatch.setattr(probe, "sample_settled_baseline", lambda: 3.0)
 
     deltas = {512: 2.05, 2048: 2.20}  # intercept ~2.0 at c->0
     def fake_measure(py, hf_id, ctx, kv_bits, repeats, *, verbose, log):
@@ -154,6 +155,7 @@ def test_calibrate_floor_applies_when_residual_low(monkeypatch, tmp_path):
     info = _model_info(weights_gb=0.5, is_causal=True, can_quantize_kv=True, max_context=32768)
     monkeypatch.setattr(models, "describe", lambda hf_id: info)
     monkeypatch.setattr(probe, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+    monkeypatch.setattr(probe, "sample_settled_baseline", lambda: 3.0)
     deltas = {512: 0.30, 2048: 0.30}  # residual goes negative -> floor applies
     monkeypatch.setattr(probe, "_measure_rung",
                         lambda py, hf, ctx, kv, r, *, verbose, log:
@@ -161,3 +163,24 @@ def test_calibrate_floor_applies_when_residual_low(monkeypatch, tmp_path):
                          "os_wired_gb": 3.3, "spread_gb": 0.0})
     result = probe.calibrate("org/tiny", verbose=False)
     assert result["fixed_overhead_gb"] == profiles.DEFAULT_FIXED_OVERHEAD_GB
+
+
+def test_calibrate_aborts_when_live_pressure_high(monkeypatch, tmp_path):
+    import pytest
+    from wmx_suite import db, models, probe, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 1, 15))
+    info = _model_info(weights_gb=0.5, is_causal=True, can_quantize_kv=True, max_context=32768)
+    monkeypatch.setattr(models, "describe", lambda hf_id: info)
+    # pre-flight passes (wired_now low), but the live settled baseline has spiked:
+    monkeypatch.setattr(probe, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+    monkeypatch.setattr(probe, "sample_settled_baseline", lambda: 16.0)  # above threshold
+    called = {"n": 0}
+    def fake_measure(*a, **k):
+        called["n"] += 1
+        return {"status": "ok", "repeats": 3, "delta": 2.0, "mlx_peak_gb": 1.0,
+                "os_wired_gb": 3.3, "spread_gb": 0.0}
+    monkeypatch.setattr(probe, "_measure_rung", fake_measure)
+    with pytest.raises(SystemExit, match="aborting"):
+        probe.calibrate("org/tiny", verbose=False)
+    assert called["n"] == 0  # aborted BEFORE launching any rung
