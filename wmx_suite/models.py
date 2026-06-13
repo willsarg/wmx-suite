@@ -139,7 +139,7 @@ def describe(hf_id: str) -> ModelInfo | None:
         n_layers=n_layers,
         growing_layers=growing,
         kv_heads=t.get("num_key_value_heads"),
-        head_dim=t.get("head_dim"),
+        head_dim=t.get("head_dim") or (t.get("hidden_size") // t.get("num_attention_heads") if t.get("hidden_size") and t.get("num_attention_heads") else None),
         hidden_size=t.get("hidden_size"),
         max_context=t.get("max_position_embeddings"),
         cache_type="RotatingKVCache" if has_sliding else "standard",
