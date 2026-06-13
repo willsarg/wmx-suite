@@ -121,3 +121,21 @@ def test_run_prompts_for_characterization(monkeypatch):
     
     assert char_called[0] is True
     assert exec_called[0] is True
+
+
+def test_characterize_and_run_fail_fast_on_non_causal(monkeypatch):
+    # Mock describe to return a non-causal model info
+    non_causal_info = MagicMock(is_causal=False)
+    monkeypatch.setattr(models, "describe", lambda hf_id: non_causal_info)
+    
+    # characterize should raise SystemExit with clean msg
+    from wmx_suite.probe import characterize
+    with pytest.raises(SystemExit) as excinfo:
+        characterize("test/non-causal")
+    assert "not a supported causal language model" in str(excinfo.value)
+    
+    # launcher.plan should return an error dictionary
+    from wmx_suite.launcher import plan
+    p = plan("test/non-causal")
+    assert "error" in p
+    assert "not a supported causal language model" in p["error"]

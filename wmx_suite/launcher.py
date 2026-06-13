@@ -68,6 +68,8 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
     info = models.describe(hf_id)
     if info is None:
         return {"error": f"model not found in HF cache: {hf_id}"}
+    if not info.is_causal:
+        return {"error": f"Model {hf_id} is not a supported causal language model."}
 
     margin_gb = config.margin_gb(margin_gb)
     limits = read_limits()

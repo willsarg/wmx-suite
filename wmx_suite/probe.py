@@ -125,6 +125,8 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     info = models.describe(hf_id)
     if info is None:
         raise SystemExit(f"model not found in HF cache: {hf_id}")
+    if not info.is_causal:
+        raise SystemExit(f"[characterize] REFUSED: Model {hf_id} is not a supported causal language model.")
 
     kv_bits = 4 if info.can_quantize_kv else None  # quantize only quantizable cache types
     py = worker_python or sys.executable
