@@ -1,6 +1,6 @@
 import pytest
 
-from wmx_suite import models, probe
+from wmx_suite import db, models, probe
 from wmx_suite.system import SystemLimits
 
 
@@ -66,11 +66,30 @@ def test_solve_ctx_uses_documented_equation(
     assert probe._solve_ctx(model_base, slope, baseline, target) == expected
 
 
-def test_estimate_base_uses_live_baseline_above_floor():
+def test_estimate_base_uses_live_baseline_above_floor(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    con = db.connect()
     expected = 4.0 + 8.0 * probe.RESIDENT_FACTOR + probe.FIXED_OVERHEAD_GB
-    assert probe.estimate_base_gb(_model_info(), _limits(4.0)) == pytest.approx(expected)
+    assert probe.estimate_base_gb(_model_info(), _limits(4.0), con) == pytest.approx(expected)
 
 
-def test_estimate_base_uses_two_point_five_gb_baseline_floor():
+def test_estimate_base_uses_two_point_five_gb_baseline_floor(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    con = db.connect()
     expected = 2.5 + 8.0 * probe.RESIDENT_FACTOR + probe.FIXED_OVERHEAD_GB
-    assert probe.estimate_base_gb(_model_info(), _limits(1.0)) == pytest.approx(expected)
+    assert probe.estimate_base_gb(_model_info(), _limits(1.0), con) == pytest.approx(expected)
+
+
+def test_estimate_base_gb_uses_profile_overhead(monkeypatch, tmp_path):
+    from wmx_suite import profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    key = ("Apple M4 Pro", 1, 15)
+    monkeypatch.setattr(profiles, "machine_key", lambda: key)
+    con = db.connect()
+    info = _model_info(weights_gb=4.0)
+    limits = _limits(wired_now_gb=3.0)
+    base_default = probe.estimate_base_gb(info, limits, con)   # overhead 1.0
+    db.upsert_profile(con, key, resident_factor=1.05, fixed_overhead_gb=2.5,
+                      model_id="m", n_points=2, mlx_version="9.9")
+    base_profile = probe.estimate_base_gb(info, limits, con)
+    assert round(base_profile - base_default, 3) == 1.5   # overhead 2.5 - 1.0

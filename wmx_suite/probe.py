@@ -22,7 +22,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from . import config, db, models
+from . import config, db, models, profiles
 from .system import SystemLimits, read_limits, sample_settled_baseline
 
 DEFAULT_RAMP = [2048, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
@@ -30,8 +30,8 @@ MIN_PROBE_CTX = 512  # supervised calibration probe — deep in the safe zone
 DEFAULT_REPEATS = 3  # N-repeat median per rung, to smooth prefill-transient sampling jitter
 # rough base-footprint estimate (GB): weights resident + fixed overhead, on top of the
 # live system baseline. Calibrated loosely on Gemma/Qwen; refined as more models run.
-RESIDENT_FACTOR = 1.05
-FIXED_OVERHEAD_GB = 1.0
+RESIDENT_FACTOR = profiles.DEFAULT_RESIDENT_FACTOR
+FIXED_OVERHEAD_GB = profiles.DEFAULT_FIXED_OVERHEAD_GB
 
 
 @dataclass
@@ -70,10 +70,11 @@ def _solve_ctx(model_base: float, slope_per_k: float, ref_baseline: float,
     return int(max(0.0, headroom / slope_per_k) * 1000)
 
 
-def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits) -> float:
+def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, con) -> float:
     """Pre-flight guess of ABSOLUTE base (context->0) OS-wired footprint, before any probe."""
+    factor, overhead, _ = profiles.cold_start_constants(con)
     os_baseline = max(limits.wired_now_gb, 2.5)
-    return os_baseline + info.weights_gb * RESIDENT_FACTOR + FIXED_OVERHEAD_GB
+    return os_baseline + info.weights_gb * factor + overhead
 
 
 def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, *, verbose, log) -> dict | None:
@@ -151,7 +152,7 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     ys: list[float] = []     # DELTA over launch baseline (model's own footprint)
 
     # ---- pre-flight gate -------------------------------------------------
-    est = estimate_base_gb(info, limits)
+    est = estimate_base_gb(info, limits, con)
     log(f"# pre-flight base estimate: {est:.2f}GB (weights {info.weights_gb}GB)")
 
     def _refuse(reason: str):
