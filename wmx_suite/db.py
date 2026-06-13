@@ -191,3 +191,35 @@ def save_fit(con: sqlite3.Connection, run_id: int, fit: dict) -> None:
         tuple(fit.get(k) for k in keys),
     )
     con.commit()
+
+
+def get_model(con: sqlite3.Connection, hf_id: str) -> dict | None:
+    """Get metadata for a specific model."""
+    row = con.execute("SELECT * FROM models WHERE hf_id = ?", (hf_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    """Get all measurements for a specific run ordered by context."""
+    rows = con.execute(
+        "SELECT * FROM measurements WHERE run_id = ? ORDER BY context ASC",
+        (run_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_model_runs_and_fits(con: sqlite3.Connection, hf_id: str) -> list[dict]:
+    """Get all runs and fits for a specific model."""
+    rows = con.execute(
+        "SELECT r.id AS run_id, r.kv_bits, r.kv_group_size, r.quantized_kv_start, "
+        "       r.mlx_version, r.wall_gb, r.safe_threshold_gb, r.created_at AS run_created_at, "
+        "       f.model_base_gb, f.slope_gb_per_k, f.r2, f.ref_baseline_gb, "
+        "       f.safe_ceiling_ctx, f.hard_wall_ctx, f.created_at AS fit_created_at "
+        "FROM probe_runs r "
+        "LEFT JOIN fits f ON f.run_id = r.id "
+        "WHERE r.hf_id = ? "
+        "ORDER BY r.id DESC",
+        (hf_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
+

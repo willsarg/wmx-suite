@@ -1,0 +1,398 @@
+{% extends "base.html" %}
+
+{% block title %}{{ model.hf_id }} — wmx-suite{% endblock %}
+
+{% block content %}
+<div class="header-area">
+    <div>
+        <div style="margin-bottom: 0.5rem;">
+            <a href="{{ url_for('index') }}" style="font-size: 0.9rem; font-weight: 500;">&larr; Back to Dashboard</a>
+        </div>
+        <h1 class="page-title">{{ model.hf_id }}</h1>
+        <p class="page-subtitle">Architecture characteristics and context scaling memory fit.</p>
+    </div>
+    
+    <div>
+        {% if latest_fit %}
+        <span class="badge badge-cyan" style="font-size: 0.9rem; padding: 0.5rem 1rem;">
+            Safe Ceiling: {{ latest_fit.safe_ceiling_ctx | format_number }} tok
+        </span>
+        {% else %}
+        <span class="badge badge-danger" style="font-size: 0.9rem; padding: 0.5rem 1rem;">
+            Uncharacterized
+        </span>
+        {% endif %}
+    </div>
+</div>
+
+{% if fit_stale %}
+<div class="alert-box alert-box-warning">
+    <span>⚠️</span>
+    <div>
+        <strong>Warning:</strong> Model cache artifacts have updated since the last characterization. The measurements and fit line below may be stale. Consider running <code>uv run wmx-suite characterize {{ model.hf_id }}</code>.
+    </div>
+</div>
+{% endif %}
+
+<!-- Model Architecture & Summary Details -->
+<div class="grid-cols-2">
+    <!-- Architecture Info Card -->
+    <div class="card" style="margin-bottom: 0;">
+        <div class="card-title">Architecture Parameters</div>
+        <table class="custom-table" style="font-size: 0.9rem;">
+            <tbody>
+                <tr>
+                    <td style="color: var(--text-secondary); width: 45%;">Weights size</td>
+                    <td style="font-weight: 600;">{{ model.weights_gb }} GB</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Total Hidden Layers</td>
+                    <td>{{ model.n_layers }}</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Attention-growing Layers</td>
+                    <td>{{ model.growing_layers }} <span style="color: var(--text-muted); font-size: 0.8rem;">(Full attention)</span></td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">KV Heads</td>
+                    <td>{{ model.kv_heads if model.kv_heads else 'n/a' }}</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Head Dimension</td>
+                    <td>{{ model.head_dim if model.head_dim else 'n/a' }}</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Max Context (Config)</td>
+                    <td>{{ model.max_context | format_number if model.max_context else 'n/a' }} tokens</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Max KV Size Enforced</td>
+                    <td>
+                        {% if model.max_kv_size_enforced %}
+                        <span class="badge badge-cyan" style="font-size: 0.7rem; padding: 0.15rem 0.5rem;">Yes</span>
+                        {% else %}
+                        <span class="badge badge-danger" style="font-size: 0.7rem; padding: 0.15rem 0.5rem;">No (Bypass required)</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Characterization Fit Results Card -->
+    <div class="card" style="margin-bottom: 0;">
+        <div class="card-title">Latest Fitting Statistics</div>
+        {% if latest_fit %}
+        <table class="custom-table" style="font-size: 0.9rem;">
+            <tbody>
+                <tr>
+                    <td style="color: var(--text-secondary); width: 45%;">Fit Formula</td>
+                    <td style="font-family: monospace; font-weight: 600; color: var(--neon-cyan);">
+                        y = {{ "%.2f"|format(latest_fit.ref_baseline_gb + latest_fit.model_base_gb) }} + {{ "%.4f"|format(latest_fit.slope_gb_per_k) }} &middot; c<sub>k</sub>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Fit Base (Model Delta)</td>
+                    <td>{{ latest_fit.model_base_gb }} GB</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Slope Coefficient</td>
+                    <td>{{ "%.5f"|format(latest_fit.slope_gb_per_k) }} GB / 1k tokens</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Fit Quality (R²)</td>
+                    <td style="font-weight: 600; color: {% if latest_fit.r2 >= 0.98 %}#00b894{% else %}#ffb700{% endif %};">
+                        {{ latest_fit.r2 }}
+                    </td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Safe Ceiling Context</td>
+                    <td style="font-weight: 700; color: var(--neon-cyan);">{{ latest_fit.safe_ceiling_ctx | format_number }} tokens</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Predicted Hard Wall</td>
+                    <td style="font-weight: 700; color: var(--neon-danger);">{{ latest_fit.hard_wall_ctx | format_number }} tokens</td>
+                </tr>
+                <tr>
+                    <td style="color: var(--text-secondary);">Median Generation Speed</td>
+                    <td>
+                        {% if median_speed %}
+                        <span style="font-weight: 600;">{{ median_speed }}</span> tok/s (n={{ speed_runs }})
+                        {% else %}
+                        <span style="color: var(--text-muted);">No runs recorded</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        {% else %}
+        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-secondary); text-align: center; padding: 2rem;">
+            <p style="margin-bottom: 1rem;">This model hasn't been characterized yet.</p>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">Run the command below in your terminal to characterize:</p>
+            <code style="background: rgba(0,0,0,0.3); padding: 0.5rem 1rem; border-radius: 8px; font-family: monospace; display: block; margin-top: 0.5rem;">uv run wmx-suite characterize {{ model.hf_id }}</code>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Regression Plot Card -->
+{% if latest_fit %}
+<div class="card" style="margin-top: 2rem;">
+    <div class="card-title">Memory Scaling Profile & Projection</div>
+    <div style="position: relative; height: 400px; width: 100%;">
+        <canvas id="fitChart"></canvas>
+    </div>
+</div>
+{% endif %}
+
+<!-- Tabular Data -->
+<div class="grid-cols-2" style="margin-top: 2rem;">
+    <!-- Raw Measurements -->
+    {% if latest_fit %}
+    <div class="card">
+        <div class="card-title">Raw Measurements (Latest Run)</div>
+        <div class="table-responsive" style="max-height: 350px;">
+            <table class="custom-table" style="font-size: 0.85rem;">
+                <thead>
+                    <tr>
+                        <th>Context</th>
+                        <th>OS Wired (GB)</th>
+                        <th>MLX Peak (GB)</th>
+                        <th>MLX True (GB)</th>
+                        <th>Delta (GB)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in measurements %}
+                    <tr>
+                        <td>{{ m.context | format_number }}</td>
+                        <td style="font-weight: 500; color: var(--neon-cyan);">{{ m.os_wired_gb }}</td>
+                        <td>{{ m.mlx_peak_gb if m.mlx_peak_gb else 'n/a' }}</td>
+                        <td>{{ m.mlx_true_gb if m.mlx_true_gb else 'n/a' }}</td>
+                        <td>{{ "%.3f"|format(m.os_wired_gb - latest_fit.ref_baseline_gb) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Run History -->
+    <div class="card">
+        <div class="card-title">Characterization History</div>
+        <div class="table-responsive" style="max-height: 350px;">
+            <table class="custom-table" style="font-size: 0.85rem;">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Safe Ceiling</th>
+                        <th>R²</th>
+                        <th>Baseline</th>
+                        <th>Threshold</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in runs %}
+                    <tr>
+                        <td>{{ r.run_created_at.split('T')[0] }}</td>
+                        <td style="font-weight: 600; color: var(--neon-cyan);">
+                            {% if r.safe_ceiling_ctx %}
+                            {{ r.safe_ceiling_ctx | format_number }}
+                            {% else %}
+                            <span style="color: var(--neon-danger);">Refused</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ r.r2 if r.r2 is not none else 'n/a' }}</td>
+                        <td>{{ r.ref_baseline_gb if r.ref_baseline_gb else 'n/a' }} GB</td>
+                        <td>{{ r.safe_threshold_gb }} GB</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if latest_fit %}
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const ctx = document.getElementById('fitChart').getContext('2d');
+        
+        const slope = {{ latest_fit.slope_gb_per_k }};
+        const refBaseline = {{ latest_fit.ref_baseline_gb }};
+        const modelBase = {{ latest_fit.model_base_gb }};
+        const intercept = refBaseline + modelBase;
+        
+        const safeCeiling = {{ latest_fit.safe_ceiling_ctx }};
+        const hardWall = {{ latest_fit.hard_wall_ctx }};
+        const wallLimit = {{ limits.wall_gb }};
+        const safeThreshold = {{ threshold }};
+        
+        // Raw measurements data points
+        const rawPointsWired = [
+            {% for m in measurements %}
+            { x: {{ m.context }}, y: {{ m.os_wired_gb }} }{% if not loop.last %}, {% endif %}
+            {% endfor %}
+        ];
+        
+        const rawPointsMlxPeak = [
+            {% for m in measurements %}
+            {% if m.mlx_peak_gb %}
+            { x: {{ m.context }}, y: {{ m.mlx_peak_gb }} }{% if not loop.last %}, {% endif %}
+            {% endif %}
+            {% endfor %}
+        ];
+
+        // Draw line from 0 to slightly beyond the hard wall to visualize projection
+        const lineMaxCtx = Math.max(hardWall * 1.15, rawPointsWired.length > 0 ? rawPointsWired[rawPointsWired.length - 1].x * 1.2 : 10000);
+        const fitLineData = [
+            { x: 0, y: intercept },
+            { x: safeCeiling, y: intercept + (slope / 1000) * safeCeiling },
+            { x: hardWall, y: intercept + (slope / 1000) * hardWall },
+            { x: lineMaxCtx, y: intercept + (slope / 1000) * lineMaxCtx }
+        ];
+
+        new Chart(ctx, {
+            type: 'scatter',
+            data: {
+                datasets: [
+                    {
+                        label: 'OS Wired Memory (Measured)',
+                        data: rawPointsWired,
+                        backgroundColor: '#00f0ff',
+                        borderColor: '#00f0ff',
+                        borderWidth: 1.5,
+                        pointRadius: 6,
+                        pointHoverRadius: 8,
+                        showLine: false,
+                    },
+                    {
+                        label: 'MLX Reported Peak (Ref Only)',
+                        data: rawPointsMlxPeak,
+                        backgroundColor: '#c084fc',
+                        borderColor: '#c084fc',
+                        borderWidth: 1,
+                        pointRadius: 4,
+                        pointStyle: 'triangle',
+                        showLine: false,
+                    },
+                    {
+                        label: 'Fitted Regression Profile',
+                        data: fitLineData,
+                        borderColor: 'rgba(0, 240, 255, 0.45)',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        showLine: true,
+                        fill: false,
+                        pointRadius: 0,
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: '#a0aec0',
+                            font: { family: 'Outfit', size: 12 }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(10, 8, 20, 0.95)',
+                        titleColor: '#ffffff',
+                        bodyColor: '#ffffff',
+                        borderColor: 'rgba(255, 255, 255, 0.1)',
+                        borderWidth: 1,
+                        titleFont: { family: 'Outfit', weight: 'bold' },
+                        bodyFont: { family: 'Outfit' },
+                        callbacks: {
+                            label: function(context) {
+                                return `Context: ${context.parsed.x.toLocaleString()} tokens | Memory: ${context.parsed.y.toFixed(2)} GB`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: 'linear',
+                        position: 'bottom',
+                        grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                        title: {
+                            display: true,
+                            text: 'Context Size (tokens)',
+                            color: '#a0aec0',
+                            font: { family: 'Outfit', size: 12 }
+                        },
+                        ticks: {
+                            color: '#a0aec0',
+                            font: { family: 'Outfit', size: 11 },
+                            callback: function(value) {
+                                if (value >= 1000) {
+                                    return (value / 1000) + 'k';
+                                }
+                                return value;
+                            }
+                        },
+                        min: 0,
+                        max: lineMaxCtx
+                    },
+                    y: {
+                        grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                        title: {
+                            display: true,
+                            text: 'OS Wired Memory (GB)',
+                            color: '#a0aec0',
+                            font: { family: 'Outfit', size: 12 }
+                        },
+                        ticks: {
+                            color: '#a0aec0',
+                            font: { family: 'Outfit', size: 11 }
+                        },
+                        min: 0,
+                        max: Math.max(wallLimit * 1.15, intercept * 1.2)
+                    }
+                }
+            },
+            plugins: [{
+                id: 'horizontalLines',
+                afterDraw: function(chart) {
+                    const ctx = chart.ctx;
+                    const yAxis = chart.scales.y;
+                    const xAxis = chart.scales.x;
+                    
+                    const drawLimitLine = (yValue, color, label, lineDash = []) => {
+                        const yPixel = yAxis.getPixelForValue(yValue);
+                        if (yPixel >= yAxis.top && yPixel <= yAxis.bottom) {
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.moveTo(xAxis.left, yPixel);
+                            ctx.lineTo(xAxis.right, yPixel);
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 1.5;
+                            ctx.setLineDash(lineDash);
+                            ctx.stroke();
+                            
+                            // Draw Text Label
+                            ctx.fillStyle = color;
+                            ctx.font = '10px Outfit';
+                            ctx.fillText(label, xAxis.left + 10, yPixel - 6);
+                            ctx.restore();
+                        }
+                    };
+                    
+                    // Draw Threshold
+                    drawLimitLine(safeThreshold, 'rgba(0, 240, 255, 0.5)', `Safe Threshold: ${safeThreshold.toFixed(2)} GB`, [2, 2]);
+                    
+                    // Draw Crash Wall
+                    drawLimitLine(wallLimit, 'rgba(255, 0, 85, 0.6)', `Crash Wall: ${wallLimit.toFixed(2)} GB`, []);
+                }
+            }]
+        });
+    });
+</script>
+{% endif %}
+{% endblock %}
