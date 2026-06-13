@@ -81,6 +81,13 @@ v0 scaffold. Validated methodology: predicted Gemma's ceiling to within 0.5% fro
 probes. Calibration of the pre-flight base estimate refines as more models are run.
 Flask UI (`web` extra) is optional and not yet built.
 
+## Contributing
+
+Contributions are welcome — especially **calibration data from other Apple Silicon
+SKUs**, which is how the suite becomes trustworthy beyond the reference M4 Pro. See
+[CONTRIBUTING.md](./CONTRIBUTING.md). The prime directive applies to every change:
+never ship something that can crash a machine.
+
 ## Trademarks
 
 MLX, Apple Silicon, Metal, Mac, and macOS are trademarks of Apple Inc. This project is
