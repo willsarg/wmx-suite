@@ -183,6 +183,19 @@ CREATE TABLE IF NOT EXISTS kokoro_baseline_measurements (
     overhead_gb REAL NOT NULL,
     FOREIGN KEY (run_id) REFERENCES kokoro_baseline_runs(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS system_profiles (
+    device_name       TEXT NOT NULL,
+    total_ram_bytes   INTEGER NOT NULL,
+    macos_major       INTEGER NOT NULL,
+    resident_factor   REAL NOT NULL,
+    fixed_overhead_gb REAL NOT NULL,
+    model_id          TEXT,
+    n_points          INTEGER,
+    mlx_version       TEXT,
+    calibrated_at     TEXT,
+    PRIMARY KEY (device_name, total_ram_bytes, macos_major)
+);
 """
 
 
@@ -215,6 +228,37 @@ def upsert_model(con: sqlite3.Connection, info: dict) -> None:
         row,
     )
     con.commit()
+
+
+def upsert_profile(con: sqlite3.Connection, key: tuple[str, int, int], *,
+                   resident_factor: float, fixed_overhead_gb: float,
+                   model_id: str | None, n_points: int | None,
+                   mlx_version: str | None) -> None:
+    device_name, total_ram_bytes, macos_major = key
+    con.execute(
+        "INSERT INTO system_profiles (device_name, total_ram_bytes, macos_major, "
+        "resident_factor, fixed_overhead_gb, model_id, n_points, mlx_version, calibrated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(device_name, total_ram_bytes, macos_major) DO UPDATE SET "
+        "resident_factor=excluded.resident_factor, "
+        "fixed_overhead_gb=excluded.fixed_overhead_gb, model_id=excluded.model_id, "
+        "n_points=excluded.n_points, mlx_version=excluded.mlx_version, "
+        "calibrated_at=excluded.calibrated_at",
+        (device_name, total_ram_bytes, macos_major, resident_factor, fixed_overhead_gb,
+         model_id, n_points, mlx_version, _now()),
+    )
+    con.commit()
+
+
+def get_profile(con: sqlite3.Connection, key: tuple[str, int, int]) -> dict | None:
+    device_name, total_ram_bytes, macos_major = key
+    row = con.execute(
+        "SELECT device_name, total_ram_bytes, macos_major, resident_factor, "
+        "fixed_overhead_gb, model_id, n_points, mlx_version, calibrated_at "
+        "FROM system_profiles WHERE device_name=? AND total_ram_bytes=? AND macos_major=?",
+        (device_name, total_ram_bytes, macos_major),
+    ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def start_run(con: sqlite3.Connection, hf_id: str, *, kv_bits, kv_group_size,

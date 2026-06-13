@@ -100,3 +100,33 @@ def test_latest_fits_returns_only_newest_fit(monkeypatch, tmp_path):
     assert len(rows) == 1
     assert rows[0]["model_base_gb"] == 8.0
     assert rows[0]["characterized_at"]
+
+
+def test_profile_roundtrip_and_upsert(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    con = db.connect()
+    key = ("Apple M4 Pro", 25769803776, 15)
+
+    assert db.get_profile(con, key) is None
+
+    db.upsert_profile(
+        con, key,
+        resident_factor=1.05, fixed_overhead_gb=1.0,
+        model_id="mlx-community/tiny", n_points=2, mlx_version="9.9",
+    )
+    row = db.get_profile(con, key)
+    assert row["device_name"] == "Apple M4 Pro"
+    assert row["total_ram_bytes"] == 25769803776
+    assert row["macos_major"] == 15
+    assert row["fixed_overhead_gb"] == 1.0
+    assert row["model_id"] == "mlx-community/tiny"
+    assert row["calibrated_at"]  # set by upsert
+
+    db.upsert_profile(
+        con, key,
+        resident_factor=1.05, fixed_overhead_gb=1.7,
+        model_id="mlx-community/tiny", n_points=2, mlx_version="9.9",
+    )
+    assert db.get_profile(con, key)["fixed_overhead_gb"] == 1.7
+    count = con.execute("SELECT COUNT(*) FROM system_profiles").fetchone()[0]
+    assert count == 1
