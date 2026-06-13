@@ -53,6 +53,7 @@ uv run wmx-suite health                   # live pressure + per-model go/no-go (
 uv run wmx-suite scan                     # register mlx-community models from HF cache
 uv run wmx-suite show <hf_id>             # architecture + memory class
 uv run wmx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)
+uv run wmx-suite calibrate                # seed this machine's cold-start overhead profile
 uv run wmx-suite list                     # ceilings from the DB
 uv run wmx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
 uv run wmx-suite web                      # launch the Flask web UI dashboard (default port 5001)
@@ -148,6 +149,9 @@ be verified. Qwen3.5 is also refused unless forced while its custom MLX cache ig
 
 - Calibrate the pre-flight base estimate in `probe.py` (`RESIDENT_FACTOR`,
   `FIXED_OVERHEAD_GB`) and `launcher.PREFILL_SPIKE_MULT` as more models are characterized.
+  `calibrate` tunes only the cold-start estimate (the `FIXED_OVERHEAD_GB` term) per machine
+  and is floored at the default so it can only tighten the estimate; `characterize` remains
+  the per-model per-machine adaptation mechanism.
 - `run`'s uncharacterized-model fallback uses a conservative analytic estimate; prefer
   running `characterize` first for any model you'll use seriously.
 
