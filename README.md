@@ -57,6 +57,7 @@ uv run wmx-suite system          # show the machine's wall, swap, baseline
 | Command | What it does |
 |---|---|
 | `uv run wmx-suite system` | Show the machine's wall, swap, baseline |
+| `uv run wmx-suite health` | Live snapshot: current pressure + per-model ✓/✗ go-no-go |
 | `uv run wmx-suite scan` | Register `mlx-community` models from the HF cache |
 | `uv run wmx-suite show <hf_id>` | Architecture + memory class for one model |
 | `uv run wmx-suite characterize <hf_id>` | Safe probe → fitted context ceiling |

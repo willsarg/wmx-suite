@@ -49,6 +49,7 @@ This overrides convenience, speed, and completeness. Concretely:
 ```bash
 uv sync                                   # install deps into .venv
 uv run wmx-suite system                   # machine wall, swap, baseline
+uv run wmx-suite health                   # live pressure + per-model go/no-go (read-only)
 uv run wmx-suite scan                     # register mlx-community models from HF cache
 uv run wmx-suite show <hf_id>             # architecture + memory class
 uv run wmx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)

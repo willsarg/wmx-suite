@@ -9,6 +9,8 @@ Two failure modes a naive launcher hits, and how we avoid them:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from . import db, models
 from .probe import FIXED_OVERHEAD_GB, RESIDENT_FACTOR
 from .system import read_limits, sample_settled_baseline
@@ -24,6 +26,34 @@ def _estimated_slope_gb_per_k(info: models.ModelInfo) -> float:
     """Conservative os-wired slope estimate for an uncharacterized model (GB per 1k tokens)."""
     kv_slope = info.fp16_kv_bytes_per_token() * 1000 / 1e9  # fp16 steady-state KV
     return kv_slope * PREFILL_SPIKE_MULT
+
+
+@dataclass(frozen=True)
+class Prediction:
+    base_abs_gb: float     # live baseline + model's own footprint at context -> 0
+    headroom_gb: float     # threshold - base_abs (negative => won't even load safely)
+    breaches_wall: bool    # base_abs alone crosses the hard wall — can't load at all
+    safe_ctx: int          # max context before predicted peak hits the threshold
+
+
+def predict(*, model_base_gb: float, slope_gb_per_k: float, live_base_gb: float,
+            threshold_gb: float, wall_gb: float, model_max: int | None) -> Prediction:
+    """Single source of truth for the crash-prediction math, shared by `plan` and `health`.
+
+    Given a model's curve (base footprint + slope) and the live system baseline, work out
+    the absolute base load and the safe context ceiling under the threshold. Keeping this
+    in one place means `health`'s verdict can never drift from what `run` actually does.
+    """
+    base_abs = live_base_gb + model_base_gb
+    headroom = threshold_gb - base_abs
+    if slope_gb_per_k > 0:
+        cap = int(max(0.0, headroom / slope_gb_per_k) * 1000)
+    else:
+        cap = model_max or 0
+    if model_max:
+        cap = min(cap, model_max)
+    return Prediction(base_abs_gb=base_abs, headroom_gb=headroom,
+                      breaches_wall=base_abs >= wall_gb, safe_ctx=cap)
 
 
 def plan(hf_id: str, *, margin_gb: float = 2.0) -> dict:
@@ -49,27 +79,25 @@ def plan(hf_id: str, *, margin_gb: float = 2.0) -> dict:
         slope = _estimated_slope_gb_per_k(info)
         source = "estimated"
 
-    base_abs = live_base + model_base
+    pred = predict(model_base_gb=model_base, slope_gb_per_k=slope, live_base_gb=live_base,
+                   threshold_gb=threshold, wall_gb=wall, model_max=info.max_context)
     p = {
         "hf_id": hf_id, "kv_bits": kv_bits, "source": source,
         "cache_type": info.cache_type, "model_max": info.max_context,
         "live_base_gb": round(live_base, 2), "model_base_gb": round(model_base, 2),
-        "base_abs_gb": round(base_abs, 2), "slope_gb_per_k": round(slope, 5),
+        "base_abs_gb": round(pred.base_abs_gb, 2), "slope_gb_per_k": round(slope, 5),
         "threshold_gb": round(threshold, 2), "wall_gb": round(wall, 2),
     }
 
-    # fix #2 + RULE #1: would it breach the wall just to load?
-    if base_abs >= wall:
+    # RULE #1: would it breach the wall just to load?
+    if pred.breaches_wall:
         p["refuse"] = True
-        p["reason"] = (f"weights+baseline ≈ {base_abs:.2f}GB ≥ wall {wall:.2f}GB — would "
-                       f"breach the wall on load. Cannot run safely on this machine.")
+        p["reason"] = (f"weights+baseline ≈ {pred.base_abs_gb:.2f}GB ≥ wall {wall:.2f}GB — "
+                       f"would breach the wall on load. Cannot run safely on this machine.")
         p["max_kv_size"] = 0
         return p
 
-    headroom = threshold - base_abs
-    cap = int(max(0.0, headroom / slope) * 1000) if slope > 0 else (info.max_context or 0)
-    if info.max_context:
-        cap = min(cap, info.max_context)
+    cap = pred.safe_ctx
     p["max_kv_size"] = cap
     if cap < MIN_USEFUL_CTX:
         p["refuse"] = True

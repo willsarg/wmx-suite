@@ -1,6 +1,7 @@
 """Command-line entry point for the suite.
 
     uv run wmx-suite system                 # show the machine's memory wall + swap
+    uv run wmx-suite health                  # live snapshot: pressure + per-model go/no-go
     uv run wmx-suite scan                    # register all mlx-community models in the cache
     uv run wmx-suite show <hf_id>            # architecture + memory class for one model
     uv run wmx-suite characterize <hf_id>   # safe probe -> fitted context ceiling
@@ -13,7 +14,7 @@ import os
 import sys
 
 from . import db, launcher, models, probe
-from .system import read_limits
+from .system import read_limits, sample_settled_baseline
 
 
 def cmd_system(_):
@@ -26,6 +27,66 @@ def cmd_system(_):
           else "swap free           : unknown")
     print(f"wired now (baseline): {s.wired_now_gb:.2f} GB")
     print(f"safe threshold (2GB): {s.safe_threshold_gb():.2f} GB")
+
+
+def cmd_health(args):
+    """Live 'can I run things safely right now?' snapshot: system pressure + per-model go/no-go."""
+    color = sys.stdout.isatty()
+
+    def c(text, name):
+        codes = {"green": "32", "red": "31", "yellow": "33"}
+        return f"\033[{codes[name]}m{text}\033[0m" if color else text
+
+    s = read_limits()
+    threshold = s.safe_threshold_gb(args.margin)
+    live_base = sample_settled_baseline()  # same baseline `run` uses, sampled once
+
+    print(f"device              : {s.device}")
+    print(f"crash wall          : {s.wall_gb:.2f} GB")
+    print(f"safe threshold      : {threshold:.2f} GB  (wall − {args.margin:g}GB margin)")
+    if s.swap_free_gb is None:
+        print("swap free           : unknown")
+    elif s.swap_free_gb < 2.0:
+        print(f"swap free           : {s.swap_free_gb:.2f} GB   "
+              + c("⚠ low — crossing the wall may hard-lock", "yellow"))
+    else:
+        print(f"swap free           : {s.swap_free_gb:.2f} GB")
+    print(f"wired now           : {live_base:.2f} GB")
+    print(f"free headroom       : {threshold - live_base:.2f} GB  (threshold − wired now)")
+
+    con = db.connect()
+    rows = con.execute(
+        "SELECT DISTINCT m.hf_id, m.max_context FROM models m "
+        "JOIN probe_runs r ON r.hf_id = m.hf_id JOIN fits f ON f.run_id = r.id "
+        "ORDER BY m.hf_id"
+    ).fetchall()
+    if not rows:
+        print("\nno characterized models yet — run `characterize <hf_id>`")
+        return
+
+    print("\ncharacterized models — can it load & run safely now?")
+    width = max(len(r["hf_id"]) for r in rows)
+    for r in rows:
+        fit = db.latest_fit(con, r["hf_id"])
+        if not fit or not fit.get("slope_gb_per_k"):
+            continue
+        pred = launcher.predict(
+            model_base_gb=float(fit["model_base_gb"]),
+            slope_gb_per_k=float(fit["slope_gb_per_k"]),
+            live_base_gb=live_base, threshold_gb=threshold,
+            wall_gb=s.wall_gb, model_max=r["max_context"],
+        )
+        go = (not pred.breaches_wall) and pred.safe_ctx >= launcher.MIN_USEFUL_CTX
+        glyph = c("✓", "green") if go else c("✗", "red")
+        hr = f"{'+' if pred.headroom_gb >= 0 else '-'}{abs(pred.headroom_gb):.2f}GB"
+        if pred.breaches_wall:
+            tail = c("won't load safely", "red")
+        elif not go:
+            tail = c(f"safe≈{pred.safe_ctx:,} ctx (too small)", "red")
+        else:
+            tail = f"safe≈{pred.safe_ctx:,} ctx"
+        print(f"  {glyph}  {r['hf_id']:<{width}}  base {pred.base_abs_gb:5.2f}GB  "
+              f"{hr:>9}  {tail}")
 
 
 def cmd_scan(_):
@@ -156,6 +217,8 @@ def _main_argparse():
     ap = argparse.ArgumentParser(prog="wmx-suite")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("system").set_defaults(func=cmd_system)
+    p = sub.add_parser("health"); p.add_argument("--margin", type=float, default=2.0)
+    p.set_defaults(func=cmd_health)
     sub.add_parser("scan").set_defaults(func=cmd_scan)
     p = sub.add_parser("show"); p.add_argument("hf_id"); p.set_defaults(func=cmd_show)
     p = sub.add_parser("characterize"); p.add_argument("hf_id")
