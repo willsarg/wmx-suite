@@ -15,6 +15,9 @@ for the full reasoning.
 ## Running things
 
 - Use `uv run mlx-suite <cmd>` (see AGENTS.md for the command list).
+- **Launch models only via `uv run mlx-suite run --model <id> ...`** — it replaced the
+  deleted `~/bin/mlx_safe` and is the only crash-safe launch path. Never call
+  `mlx_lm.generate` directly at non-trivial context. `--dry-run` shows the plan.
 - Long probes / model loads: run in the background and report back, rather than blocking.
 - Package installs: **`uv` only, never `--break-system-packages`.**
 

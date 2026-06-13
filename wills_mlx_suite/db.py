@@ -121,6 +121,16 @@ def add_measurement(con: sqlite3.Connection, run_id: int, context: int, *,
     con.commit()
 
 
+def latest_fit(con: sqlite3.Connection, hf_id: str) -> dict | None:
+    """Most recent fitted curve for a model, or None if never characterized."""
+    row = con.execute(
+        "SELECT f.* FROM fits f JOIN probe_runs r ON f.run_id = r.id "
+        "WHERE r.hf_id = ? ORDER BY f.id DESC LIMIT 1",
+        (hf_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def save_fit(con: sqlite3.Connection, run_id: int, fit: dict) -> None:
     fit = {**fit, "run_id": run_id, "created_at": _now()}
     keys = ["run_id", "model_base_gb", "slope_gb_per_k", "r2", "ref_baseline_gb",

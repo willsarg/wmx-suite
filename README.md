@@ -38,11 +38,29 @@ uv run mlx-suite scan                     # register mlx-community models from t
 uv run mlx-suite show <hf_id>             # architecture + memory class
 uv run mlx-suite characterize <hf_id>     # safe probe -> fitted context ceiling
 uv run mlx-suite list                     # ceilings for everything characterized
+uv run mlx-suite run --model <hf_id> ...  # safely launch mlx_lm.generate (replaces mlx_safe)
 ```
 
 `characterize` refuses to launch any probe whose pre-flight base estimate already
 exceeds the safe threshold (this is how oversized models like the 27B are handled —
 predicted, never run into the wall).
+
+### `run` — the safe launcher (replaces the old `~/bin/mlx_safe`)
+
+`run` plans a launch and then execs `mlx_lm.generate`. It:
+
+- picks `--kv-bits` by **cache type** — `4` for standard caches, **omitted** for
+  RotatingKVCache models (Gemma, GPT-OSS) which can't quantize and would otherwise crash;
+- samples the **live settled baseline** and caps `--max-kv-size` at the context where
+  `live_base + model_base + slope·c` hits the safe threshold, using the model's **measured**
+  curve from `suite.db` (or a conservative estimate, with a warning, if uncharacterized);
+- **refuses** to launch if the model would breach the wall just to load (e.g. the 27B);
+  `--force` overrides at your own risk, `--dry-run` prints the plan without launching.
+
+```bash
+uv run mlx-suite run --model mlx-community/Qwen3.5-9B-OptiQ-4bit --prompt "..." --max-tokens 200
+uv run mlx-suite run --dry-run --model <hf_id> --prompt "..."   # inspect the plan only
+```
 
 ## Layout
 

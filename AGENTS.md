@@ -53,7 +53,15 @@ uv run mlx-suite scan                     # register mlx-community models from H
 uv run mlx-suite show <hf_id>             # architecture + memory class
 uv run mlx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)
 uv run mlx-suite list                     # ceilings from the DB
+uv run mlx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
 ```
+
+**`run` is the only sanctioned way to launch a model.** It replaced the old standalone
+`~/bin/mlx_safe` (now deleted — all logic lives in `launcher.py`). It picks `--kv-bits` by
+cache type (omits it for RotatingKVCache models that can't quantize), caps `--max-kv-size`
+from the measured ceiling against the live baseline, and refuses if the model would breach
+the wall on load. Use `--dry-run` to inspect the plan; `--force` overrides a refusal at
+the user's own risk. Never call `mlx_lm.generate` directly at non-trivial context.
 
 ## Conventions (Will's global prefs — enforce them)
 
@@ -81,10 +89,19 @@ Data flow: `scan/describe` → register model → `characterize` ramps context s
 storing each measurement and a fitted line (`os_wired = intercept + slope·context`) →
 solve for safe ceiling and hard wall.
 
+## Architecture (launch path)
+
+```
+launcher.py   # plan(): cache-aware kv-bits + measured/estimated --max-kv-size + refuse gate
+cli.py run    # parses passthrough args, prints the plan, execs mlx_lm.generate
+```
+
+`run` is intercepted in `cli.main()` before argparse so it can forward arbitrary flags to
+`mlx_lm.generate` (argparse.REMAINDER mishandles leading optionals).
+
 ## Known open work
 
 - Calibrate the pre-flight base estimate in `probe.py` (`RESIDENT_FACTOR`,
-  `FIXED_OVERHEAD_GB`) as more models are characterized.
-- The external `mlx_safe` wrapper (`~/bin/mlx_safe`) has two bugs this suite should
-  inform a fix for: (1) it forces `--kv-bits 4` on RotatingKVCache models (crash),
-  (2) it budgets against MLX peak instead of os_wired (unsafe).
+  `FIXED_OVERHEAD_GB`) and `launcher.PREFILL_SPIKE_MULT` as more models are characterized.
+- `run`'s uncharacterized-model fallback uses a conservative analytic estimate; prefer
+  running `characterize` first for any model you'll use seriously.

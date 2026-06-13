@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 
-from . import db, models, probe
+from . import db, launcher, models, probe
 from .system import read_limits
 
 
@@ -74,7 +76,83 @@ def cmd_list(_):
               f"wall≈{r['hard_wall_ctx']:>7,}  (R²={r['r2']})")
 
 
-def main():
+RUN_HELP = """usage: mlx-suite run [--margin GB] [--force] [--dry-run] -- <mlx_lm.generate args>
+
+Safely launch mlx_lm.generate (replaces the old mlx_safe). Picks kv-bits by cache type,
+caps --max-kv-size from the measured ceiling, and refuses if the run would breach the wall.
+The passthrough args must include --model <hf_id>.
+
+  --margin GB   safety cushion under the wall (default 2.0)
+  --force       launch even if the planner refuses (may crash the machine)
+  --dry-run     print the plan, do not launch
+"""
+
+
+def cmd_run_raw(run_args: list[str]):
+    """Parse leading suite flags, then treat the remainder as mlx_lm.generate passthrough.
+
+    Done manually (not argparse) because argparse.REMAINDER mishandles optionals that
+    precede the positional, and we want `run --model X ...` to work as a drop-in.
+    """
+    margin, force, dry = 2.0, False, False
+    i = 0
+    while i < len(run_args):
+        a = run_args[i]
+        if a in ("-h", "--help"):
+            print(RUN_HELP); return
+        if a == "--margin":
+            margin = float(run_args[i + 1]); i += 2; continue
+        if a == "--force":
+            force = True; i += 1; continue
+        if a == "--dry-run":
+            dry = True; i += 1; continue
+        break  # first non-suite token: the rest is passthrough
+    rest = run_args[i:]
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    _run(rest, margin=margin, force=force, dry_run=dry)
+
+
+def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool):
+    """Safe replacement for the old mlx_safe: plan a launch, then exec mlx_lm.generate."""
+    model_id = None
+    for i, a in enumerate(rest):
+        if a == "--model" and i + 1 < len(rest):
+            model_id = rest[i + 1]
+            break
+    if model_id is None:
+        raise SystemExit("[run] --model is required")
+
+    p = launcher.plan(model_id, margin_gb=margin)
+    if p.get("error"):
+        raise SystemExit(f"[run] {p['error']}")
+
+    kv = "fp16 (RotatingKVCache — not quantizable)" if p["kv_bits"] is None else f"{p['kv_bits']}-bit"
+    print(f"[run] {model_id}", file=sys.stderr)
+    print(f"[run] source={p['source']}  cache={p['cache_type']}  kv={kv}", file=sys.stderr)
+    print(f"[run] live_base {p['live_base_gb']}GB + model {p['model_base_gb']}GB = "
+          f"{p['base_abs_gb']}GB  |  slope {p['slope_gb_per_k']}GB/1k  |  "
+          f"wall {p['wall_gb']}GB  threshold {p['threshold_gb']}GB", file=sys.stderr)
+
+    if p.get("refuse"):
+        print(f"[run] REFUSED: {p['reason']}", file=sys.stderr)
+        if not force:
+            print("[run] (pass --force to override at your own risk — may crash the machine)",
+                  file=sys.stderr)
+            sys.exit(2)
+        print("[run] --force given; proceeding against safety advice.", file=sys.stderr)
+
+    argv = launcher.build_argv(rest, p)
+    print(f"[run] max-kv-size {p['max_kv_size']:,} tokens (model cap {p['model_max']:,})",
+          file=sys.stderr)
+    print(f"[run] exec: mlx_lm.generate {' '.join(argv)}\n", file=sys.stderr)
+    if dry_run:
+        print("[run] --dry-run: not launching.", file=sys.stderr)
+        return
+    os.execvp("mlx_lm.generate", ["mlx_lm.generate"] + argv)
+
+
+def _main_argparse():
     ap = argparse.ArgumentParser(prog="mlx-suite")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("system").set_defaults(func=cmd_system)
@@ -90,8 +168,20 @@ def main():
                         "(smooths prefill-transient jitter)")
     p.set_defaults(func=cmd_characterize)
     sub.add_parser("list").set_defaults(func=cmd_list)
+    # `run` is intercepted before argparse (see below) so it can pass arbitrary flags
+    # through to mlx_lm.generate; this stub only makes it show up in `--help`.
+    sub.add_parser("run", help="safely launch mlx_lm.generate (replaces mlx_safe): picks "
+                               "kv-bits by cache type, caps --max-kv-size from the measured "
+                               "ceiling, refuses if it would breach the wall")
     args = ap.parse_args()
     args.func(args)
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] == "run":
+        return cmd_run_raw(argv[1:])
+    return _main_argparse()
 
 
 if __name__ == "__main__":
