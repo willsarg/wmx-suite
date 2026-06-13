@@ -56,10 +56,25 @@ def client(monkeypatch, tmp_path):
             "threshold_gb": 15.0,
             "safe_ceiling_ctx": 40000,
             "hard_wall_ctx": 60000,
-            "n_points": 3,
         },
     )
+    batch_run_id = db.start_kokoro_batch_run(con, "mlx-community/Kokoro-82M-bf16", "af_heart", "0.20.0")
+    db.add_kokoro_batch_measurement(con, batch_run_id, 1, 0.5, 200.0, 1.2)
+    db.add_kokoro_batch_measurement(con, batch_run_id, 2, 0.45, 440.0, 1.5)
+
+    voice_run_id = db.start_kokoro_voice_run(con, "mlx-community/Kokoro-82M-bf16", "0.20.0")
+    db.add_kokoro_voice_measurement(con, voice_run_id, "static_baseline", "af_heart", "af_heart", 120.0)
+    db.add_kokoro_voice_measurement(con, voice_run_id, "warm_switch", "af_heart", "am_adam", 125.0)
+
+    cache_run_id = db.start_kokoro_cache_run(con, "mlx-community/Kokoro-82M-bf16", "0.20.0")
+    db.add_kokoro_cache_measurement(con, cache_run_id, 1, 1.2, 0.05)
+    db.add_kokoro_cache_measurement(con, cache_run_id, 2, 1.25, 0.1)
+
+    baseline_run_id = db.start_kokoro_baseline_run(con, "mlx-community/Kokoro-82M-bf16", "0.20.0")
+    db.add_kokoro_baseline_measurement(con, baseline_run_id, 1.0, 1.85, 0.85)
+
     con.close()
+
     
     app = create_app()
     app.config["TESTING"] = True
@@ -116,3 +131,61 @@ def test_api_measurements(client):
     assert len(data) == 1
     assert data[0]["context"] == 2048
     assert data[0]["os_wired_gb"] == 5.0
+
+
+def test_kokoro_batch_dashboard_route(client):
+    rv = client.get("/kokoro-batch")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Kokoro Batch" in html
+    assert "mlx-community/Kokoro-82M-bf16" in html
+
+
+def test_kokoro_batch_run_detail_route(client):
+    rv = client.get("/kokoro-batch/run/1")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Batch Size Run Details" in html
+    assert "mlx-community/Kokoro-82M-bf16" in html
+
+
+def test_kokoro_voice_dashboard_route(client):
+    rv = client.get("/kokoro-voice")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Kokoro Voice Switching" in html
+    assert "mlx-community/Kokoro-82M-bf16" in html
+
+
+def test_kokoro_voice_run_detail_route(client):
+    rv = client.get("/kokoro-voice/run/1")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Voice Switching Run Details" in html
+    assert "static_baseline" in html
+
+
+def test_kokoro_cache_dashboard_route(client):
+    rv = client.get("/kokoro-cache")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Kokoro Voice Cache" in html
+    assert "mlx-community/Kokoro-82M-bf16" in html
+
+
+def test_kokoro_cache_run_detail_route(client):
+    rv = client.get("/kokoro-cache/run/1")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Cache Memory Run Details" in html
+    assert "Cache Size" in html
+
+
+def test_kokoro_baseline_route(client):
+    rv = client.get("/kokoro-baseline")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "Kokoro Baseline" in html
+    assert "mlx-community/Kokoro-82M-bf16" in html
+
+

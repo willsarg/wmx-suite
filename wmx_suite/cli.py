@@ -184,17 +184,617 @@ def cmd_web(args):
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 
+def cmd_benchmark_kokoro(args):
+    """Run Kokoro TTS performance sweep and log to database."""
+    import json
+    import subprocess
+    import sys
 
-RUN_HELP = """usage: wmx-suite run [--margin GB] [--force] [--dry-run] -- <mlx_lm.generate args>
+    margin_val = _configured_margin(args.margin)
+
+    print("============================================================")
+    print(" Kokoro TTS Performance Benchmark")
+    print("============================================================")
+    print(f"  Model ID    : {args.model}")
+    print(f"  Voice       : {args.voice}")
+    print(f"  Sweeps      : {args.lengths}")
+    print(f"  Repeats/len : {args.repeats}")
+    print(f"  Margin      : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    py = sys.executable
+    cmd = [
+        py, "-m", "wmx_suite.probe_worker_kokoro",
+        "--model", args.model,
+        "--voice", args.voice,
+        "--lengths", args.lengths,
+        "--repeats", str(args.repeats),
+        "--margin", str(margin_val)
+    ]
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_kokoro_run(con, args.model, args.voice, mlx_version)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
+
+    table_header = "\n\n  Length (char) | Audio (s) | Compute (s) |   RTF   |   CPS   | Peak Mem (GB)\n  --------------+-----------+-------------+---------+---------+--------------"
+    header_printed = False
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            status = data.get("status")
+            if status == "warmup_done":
+                print(" OK", end="", flush=True)
+            elif status == "safeguard_triggered":
+                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+                break
+            elif status == "rung_done":
+                if not header_printed:
+                    print(table_header)
+                    header_printed = True
+
+                length = data["length"]
+                audio_dur = data["audio_duration"]
+                comp_time = data["compute_time"]
+                rtf = data["rtf"]
+                cps = data["cps"]
+                peak_gb = data["peak_gb"]
+
+                print(f"  {length:<13} | {audio_dur:<9.2f} | {comp_time:<11.2f} | {rtf:<7.4f} | {cps:<7.1f} | {peak_gb:<12.2f}")
+
+                db.add_kokoro_measurement(
+                    con, run_id,
+                    text_length=length,
+                    audio_duration=audio_dur,
+                    compute_time=comp_time,
+                    rtf=rtf,
+                    cps=cps,
+                    peak_gb=peak_gb
+                )
+            elif status == "error":
+                print(f"\n  ERROR: {data.get('note')}")
+                proc.terminate()
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Benchmark interrupted by user.")
+        proc.terminate()
+        sys.exit(1)
+
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().strip()
+        print(f"\n  Worker exited with code {proc.returncode}.")
+        if err:
+            print(f"  Stderr: {err}")
+        sys.exit(proc.returncode)
+
+    print("============================================================")
+    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
+def cmd_benchmark_kokoro_ttfa(args):
+    """Run Kokoro TTS TTFA latency benchmark sweep and log to database."""
+    import json
+    import subprocess
+    import sys
+
+    margin_val = _configured_margin(args.margin)
+
+    print("============================================================")
+    print(" Kokoro TTS Time-to-First-Audio (TTFA) Benchmark")
+    print("============================================================")
+    print(f"  Model ID    : {args.model}")
+    print(f"  Voice       : {args.voice}")
+    print(f"  Sweeps      : {args.lengths}")
+    print(f"  Repeats/len : {args.repeats}")
+    print(f"  Margin      : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    py = sys.executable
+    cmd = [
+        py, "-m", "wmx_suite.probe_worker_kokoro_ttfa",
+        "--model", args.model,
+        "--voice", args.voice,
+        "--lengths", args.lengths,
+        "--repeats", str(args.repeats),
+        "--margin", str(margin_val)
+    ]
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_kokoro_ttfa_run(con, args.model, args.voice, mlx_version)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
+
+    table_header = "\n\n  Length (char) | TTFA (s) | Total (s) | Speedup | First Chunk (s) | Peak Mem (GB)\n  --------------+----------+-----------+---------+-----------------+--------------"
+    header_printed = False
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            status = data.get("status")
+            if status == "warmup_done":
+                print(" OK", end="", flush=True)
+            elif status == "safeguard_triggered":
+                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+                break
+            elif status == "rung_done":
+                if not header_printed:
+                    print(table_header)
+                    header_printed = True
+
+                length = data["length"]
+                ttfa_sec = data["ttfa_sec"]
+                total_sec = data["total_sec"]
+                speedup = data["speedup_ratio"]
+                chunk_dur = data["first_chunk_duration"]
+                peak_gb = data["peak_gb"]
+
+                print(f"  {length:<13} | {ttfa_sec:<8.3f} | {total_sec:<9.3f} | {speedup:<7.1f}x | {chunk_dur:<15.2f} | {peak_gb:<12.2f}")
+
+                db.add_kokoro_ttfa_measurement(
+                    con, run_id,
+                    text_length=length,
+                    ttfa_sec=ttfa_sec,
+                    total_sec=total_sec,
+                    speedup_ratio=speedup,
+                    first_chunk_duration=chunk_dur,
+                    peak_gb=peak_gb
+                )
+            elif status == "error":
+                print(f"\n  ERROR: {data.get('note')}")
+                proc.terminate()
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Benchmark interrupted by user.")
+        proc.terminate()
+        sys.exit(1)
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().strip()
+        print(f"\n  Worker exited with code {proc.returncode}.")
+        if err:
+            print(f"  Stderr: {err}")
+        sys.exit(proc.returncode)
+
+    print("============================================================")
+    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
+def cmd_benchmark_kokoro_batch(args):
+    """Run Kokoro TTS batch performance sweep and log to database."""
+    import json
+    import subprocess
+    import sys
+
+    margin_val = _configured_margin(args.margin)
+
+    print("============================================================")
+    print(" Kokoro TTS Batch Size vs Synthesis Throughput Benchmark")
+    print("============================================================")
+    print(f"  Model ID    : {args.model}")
+    print(f"  Voice       : {args.voice}")
+    print(f"  Batch Sizes : {args.batch_sizes}")
+    print(f"  Repeats     : {args.repeats}")
+    print(f"  Margin      : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    py = sys.executable
+    cmd = [
+        py, "-m", "wmx_suite.probe_worker_kokoro_batch",
+        "--model", args.model,
+        "--voice", args.voice,
+        "--batch-sizes", args.batch_sizes,
+        "--repeats", str(args.repeats),
+        "--margin", str(margin_val)
+    ]
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_kokoro_batch_run(con, args.model, args.voice, mlx_version)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
+
+    table_header = "\n\n  Batch Size    | Total Time (s) | Throughput (CPS) | Peak Mem (GB)\n  --------------+----------------+------------------+--------------"
+    header_printed = False
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            status = data.get("status")
+            if status == "warmup_done":
+                print(" OK", end="", flush=True)
+            elif status == "safeguard_triggered":
+                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+                break
+            elif status == "rung_done":
+                if not header_printed:
+                    print(table_header)
+                    header_printed = True
+
+                batch_size = data["batch_size"]
+                total_time = data["total_time"]
+                cps = data["cps"]
+                peak_gb = data["peak_gb"]
+
+                print(f"  {batch_size:<13} | {total_time:<14.2f} | {cps:<16.1f} | {peak_gb:<12.2f}")
+
+                db.add_kokoro_batch_measurement(
+                    con, run_id,
+                    batch_size=batch_size,
+                    total_time=total_time,
+                    cps=cps,
+                    peak_gb=peak_gb
+                )
+            elif status == "error":
+                print(f"\n  ERROR: {data.get('note')}")
+                proc.terminate()
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Benchmark interrupted by user.")
+        proc.terminate()
+        sys.exit(1)
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().strip()
+        print(f"\n  Worker exited with code {proc.returncode}.")
+        if err:
+            print(f"  Stderr: {err}")
+        sys.exit(proc.returncode)
+
+    print("============================================================")
+    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
+def cmd_benchmark_kokoro_voice(args):
+    """Run Kokoro TTS voice switching performance sweep and log to database."""
+    import json
+    import subprocess
+    import sys
+
+    margin_val = _configured_margin(args.margin)
+
+    print("============================================================")
+    print(" Kokoro TTS Voice Switching Latency Benchmark")
+    print("============================================================")
+    print(f"  Model ID    : {args.model}")
+    print(f"  Voice A     : {args.voice_a}")
+    print(f"  Voice B     : {args.voice_b}")
+    print(f"  Repeats     : {args.repeats}")
+    print(f"  Margin      : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    py = sys.executable
+    cmd = [
+        py, "-m", "wmx_suite.probe_worker_kokoro_voice",
+        "--model", args.model,
+        "--voice-a", args.voice_a,
+        "--voice-b", args.voice_b,
+        "--repeats", str(args.repeats),
+        "--margin", str(margin_val)
+    ]
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_kokoro_voice_run(con, args.model, mlx_version)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    print("  [warmup] Compiling model graphs and loading voices...", end="", flush=True)
+
+    table_header = "\n\n  Condition Type   | Voice From | Voice To   | Latency (ms)\n  -----------------+------------+------------+-------------"
+    header_printed = False
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            status = data.get("status")
+            if status == "warmup_done":
+                print(" OK", end="", flush=True)
+            elif status == "safeguard_triggered":
+                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+                break
+            elif status == "rung_done":
+                if not header_printed:
+                    print(table_header)
+                    header_printed = True
+
+                cond_type = data["cond_type"]
+                voice_from = data["voice_from"]
+                voice_to = data["voice_to"]
+                duration_ms = data["duration_ms"]
+
+                print(f"  {cond_type:<16} | {voice_from:<10} | {voice_to:<10} | {duration_ms:<12.1f}")
+
+                db.add_kokoro_voice_measurement(
+                    con, run_id,
+                    cond_type=cond_type,
+                    voice_from=voice_from,
+                    voice_to=voice_to,
+                    duration_ms=duration_ms
+                )
+            elif status == "error":
+                print(f"\n  ERROR: {data.get('note')}")
+                proc.terminate()
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Benchmark interrupted by user.")
+        proc.terminate()
+        sys.exit(1)
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().strip()
+        print(f"\n  Worker exited with code {proc.returncode}.")
+        if err:
+            print(f"  Stderr: {err}")
+        sys.exit(proc.returncode)
+
+    print("============================================================")
+    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
+def cmd_benchmark_kokoro_cache(args):
+    """Run Kokoro TTS cache scaling performance sweep and log to database."""
+    import json
+    import subprocess
+    import sys
+
+    margin_val = _configured_margin(args.margin)
+
+    print("============================================================")
+    print(" Kokoro TTS Voice Cache Memory Benchmark")
+    print("============================================================")
+    print(f"  Model ID    : {args.model}")
+    print(f"  Cache Sizes : {args.cache_sizes}")
+    print(f"  Margin      : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    py = sys.executable
+    cmd = [
+        py, "-m", "wmx_suite.probe_worker_kokoro_cache",
+        "--model", args.model,
+        "--cache-sizes", args.cache_sizes,
+        "--margin", str(margin_val)
+    ]
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_kokoro_cache_run(con, args.model, mlx_version)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    print("  [warmup] Compiling model graphs and loading voices...", end="", flush=True)
+
+    table_header = "\n\n  Cache Size (Voices) | OS Wired (GB) | Peak Memory (GB)\n  --------------------+---------------+-----------------"
+    header_printed = False
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            status = data.get("status")
+            if status == "warmup_done":
+                print(" OK", end="", flush=True)
+            elif status == "safeguard_triggered":
+                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+                break
+            elif status == "rung_done":
+                if not header_printed:
+                    print(table_header)
+                    header_printed = True
+
+                cache_size = data["cache_size"]
+                os_wired_gb = data["os_wired_gb"]
+                peak_gb = data["peak_gb"]
+
+                print(f"  {cache_size:<18} | {os_wired_gb:<13.3f} | {peak_gb:<15.3f}")
+
+                db.add_kokoro_cache_measurement(
+                    con, run_id,
+                    cache_size=cache_size,
+                    os_wired_gb=os_wired_gb,
+                    peak_gb=peak_gb
+                )
+            elif status == "error":
+                print(f"\n  ERROR: {data.get('note')}")
+                proc.terminate()
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Benchmark interrupted by user.")
+        proc.terminate()
+        sys.exit(1)
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().strip()
+        print(f"\n  Worker exited with code {proc.returncode}.")
+        if err:
+            print(f"  Stderr: {err}")
+        sys.exit(proc.returncode)
+
+    print("============================================================")
+    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
+def cmd_benchmark_kokoro_baseline(args):
+    """Run Kokoro TTS active baseline memory benchmark and log to database."""
+    import json
+    import subprocess
+    import sys
+
+    margin_val = _configured_margin(args.margin)
+
+    print("============================================================")
+    print(" Kokoro TTS Active Memory Baseline Benchmark")
+    print("============================================================")
+    print(f"  Model ID    : {args.model}")
+    print(f"  Voice       : {args.voice}")
+    print(f"  Margin      : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    py = sys.executable
+    cmd = [
+        py, "-m", "wmx_suite.probe_worker_kokoro_baseline",
+        "--model", args.model,
+        "--voice", args.voice,
+        "--margin", str(margin_val)
+    ]
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_kokoro_baseline_run(con, args.model, mlx_version)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+
+    print("  [profiling] Measuring settled OS baseline and active memory...", end="", flush=True)
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            status = data.get("status")
+            if status == "rung_done":
+                print(" OK", end="", flush=True)
+                
+                baseline_gb = data["baseline_gb"]
+                active_gb = data["active_gb"]
+                overhead_gb = data["overhead_gb"]
+
+                print(f"\n\n  System Baseline RAM: {baseline_gb:.3f} GB")
+                print(f"  Active Synthesis RAM: {active_gb:.3f} GB")
+                print(f"  Static Active Overhead: {overhead_gb:.3f} GB")
+
+                db.add_kokoro_baseline_measurement(
+                    con, run_id,
+                    baseline_gb=baseline_gb,
+                    active_gb=active_gb,
+                    overhead_gb=overhead_gb
+                )
+            elif status == "error":
+                print(f"\n  ERROR: {data.get('note')}")
+                proc.terminate()
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n  Benchmark interrupted by user.")
+        proc.terminate()
+        sys.exit(1)
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read().strip() if proc.stderr else ""
+        print(f"\n  Worker exited with code {proc.returncode}.")
+        if err:
+            print(f"  Stderr: {err}")
+        sys.exit(proc.returncode)
+
+    print("============================================================")
+    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
+
+
+
+
+
+RUN_HELP = """usage: wmx-suite run [--margin GB] [--force] [--dry-run] [--co-run-kokoro] -- <mlx_lm.generate args>
 
 Safely launch mlx_lm.generate. Picks kv-bits by cache type, caps --max-kv-size from the
 measured ceiling, and refuses if the run would breach the wall.
 The passthrough args must include --model <hf_id>.
 
-  --margin GB   safety cushion under the wall (default: WMX_SUITE_MARGIN_GB or 2.0)
-  --force       launch even if the planner refuses (may crash the machine)
-  --dry-run     print the plan, do not launch
-  --no-log      do not record generation speed (bare exec passthrough)
+  --margin GB         safety cushion under the wall (default: WMX_SUITE_MARGIN_GB or 2.0)
+  --force             launch even if the planner refuses (may crash the machine)
+  --dry-run           print the plan, do not launch
+  --no-log            do not record generation speed (bare exec passthrough)
+  --co-run-kokoro     subtract Kokoro static active overhead from the safe ceiling
 """
 
 _PROMPT_RE = re.compile(r"Prompt:\s*(\d+)\s*tokens,\s*([\d.]+)\s*tokens-per-sec")
@@ -269,6 +869,7 @@ def cmd_run_raw(run_args: list[str]):
     precede the positional, and we want `run --model X ...` to work as a drop-in.
     """
     margin, force, dry, log = None, False, False, True
+    co_run_kokoro = False
     i = 0
     while i < len(run_args):
         a = run_args[i]
@@ -286,15 +887,17 @@ def cmd_run_raw(run_args: list[str]):
             dry = True; i += 1; continue
         if a == "--no-log":
             log = False; i += 1; continue
+        if a == "--co-run-kokoro":
+            co_run_kokoro = True; i += 1; continue
         break  # first non-suite token: the rest is passthrough
     rest = run_args[i:]
     if rest and rest[0] == "--":
         rest = rest[1:]
-    _run(rest, margin=margin, force=force, dry_run=dry, log=log)
+    _run(rest, margin=margin, force=force, dry_run=dry, log=log, co_run_kokoro=co_run_kokoro)
 
 
 def _run(rest: list[str], *, margin: float | str | None, force: bool,
-         dry_run: bool, log: bool = True):
+         dry_run: bool, log: bool = True, co_run_kokoro: bool = False):
     """Crash-safe launch: plan a launch, then exec mlx_lm.generate."""
     model_id = None
     for i, a in enumerate(rest):
@@ -308,6 +911,17 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
         raise SystemExit("[run] --model is required")
 
     margin_gb = _configured_margin(margin)
+    if co_run_kokoro:
+        kokoro_overhead = 0.85  # default fallback
+        try:
+            con = db.connect()
+            latest_base = db.get_latest_kokoro_baseline(con)
+            if latest_base and latest_base.get("overhead_gb") is not None:
+                kokoro_overhead = float(latest_base["overhead_gb"])
+        except Exception:
+            pass
+        margin_gb += kokoro_overhead
+
     p = launcher.plan(model_id, margin_gb=margin_gb)
     if p.get("error"):
         raise SystemExit(f"[run] {p['error']}")
@@ -439,6 +1053,77 @@ def _main_argparse():
     sub.add_parser("run", help="safely launch mlx_lm.generate: picks kv-bits by cache "
                                "type, caps --max-kv-size from the measured ceiling, "
                                "refuses if it would breach the wall")
+    
+    p = sub.add_parser("benchmark-kokoro", help="Benchmark Kokoro TTS performance")
+    p.add_argument("--model", default="mlx-community/Kokoro-82M-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--voice", default="af_heart",
+                   help="Voice name to use")
+    p.add_argument("--lengths", default="10,50,100,200,500,1000,2000,3000",
+                   help="Comma-separated character lengths to sweep")
+    p.add_argument("--repeats", type=int, default=3,
+                   help="Number of trials per length")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_kokoro)
+
+    p = sub.add_parser("benchmark-kokoro-ttfa", help="Benchmark Kokoro TTS TTFA latency")
+    p.add_argument("--model", default="mlx-community/Kokoro-82M-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--voice", default="af_heart",
+                   help="Voice name to use")
+    p.add_argument("--lengths", default="10,50,100,200,500,1000,2000,3000",
+                   help="Comma-separated character lengths to sweep")
+    p.add_argument("--repeats", type=int, default=3,
+                   help="Number of trials per length")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_kokoro_ttfa)
+
+    p = sub.add_parser("benchmark-kokoro-batch", help="Benchmark Kokoro TTS batch performance (concurrency vs throughput)")
+    p.add_argument("--model", default="mlx-community/Kokoro-82M-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--voice", default="af_heart",
+                   help="Voice name to use")
+    p.add_argument("--batch-sizes", default="1,2,4,8,16",
+                   help="Comma-separated batch sizes to sweep")
+    p.add_argument("--repeats", type=int, default=3,
+                   help="Number of trials per batch size")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_kokoro_batch)
+
+    p = sub.add_parser("benchmark-kokoro-voice", help="Benchmark Kokoro TTS voice switching performance")
+    p.add_argument("--model", default="mlx-community/Kokoro-82M-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--voice-a", default="af_heart",
+                   help="Voice name A")
+    p.add_argument("--voice-b", default="am_adam",
+                   help="Voice name B")
+    p.add_argument("--repeats", type=int, default=5,
+                   help="Number of trials")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_kokoro_voice)
+
+    p = sub.add_parser("benchmark-kokoro-cache", help="Benchmark Kokoro TTS voice cache memory overhead")
+    p.add_argument("--model", default="mlx-community/Kokoro-82M-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--cache-sizes", default="0,1,2,4,8,16,24,32",
+                   help="Comma-separated cache sizes to sweep")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_kokoro_cache)
+
+    p = sub.add_parser("benchmark-kokoro-baseline", help="Benchmark Kokoro TTS static active RAM overhead")
+    p.add_argument("--model", default="mlx-community/Kokoro-82M-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--voice", default="af_heart",
+                   help="Voice name")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_kokoro_baseline)
+
     args = ap.parse_args()
     args.func(args)
 

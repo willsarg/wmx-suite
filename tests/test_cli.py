@@ -245,7 +245,7 @@ def test_run_explicit_margin_overrides_environment(monkeypatch):
 def test_run_raw_parses_margin_syntaxes(monkeypatch, run_args, expected):
     seen = {}
 
-    def run(rest, *, margin, force, dry_run, log):
+    def run(rest, *, margin, force, dry_run, log, **kwargs):
         seen.update(rest=rest, margin=margin, dry_run=dry_run)
 
     monkeypatch.setattr(cli, "_run", run)

@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+
+{% block title %}Kokoro TTFA Run #{{ run.id }} — Will's MLX Suite{% endblock %}
+
+{% block content %}
+<div class="header-area">
+    <div>
+        <a href="{{ url_for('kokoro_ttfa_dashboard') }}" style="color: var(--neon-cyan); text-decoration: none; font-size: 0.95rem; display: flex; align-items: center; gap: 0.25rem; margin-bottom: 0.5rem;">
+            <span>←</span> Back to Kokoro TTFA Latencies
+        </a>
+        <h1 class="page-title">Kokoro TTFA Run #{{ run.id }}</h1>
+        <p class="page-subtitle">TTFA latency and streaming speedup analysis for model <strong>{{ run.model_id }}</strong> (voice: <strong>{{ run.voice }}</strong>).</p>
+    </div>
+</div>
+
+<!-- Metadata Cards -->
+<div class="card grid-cols-4" style="margin-bottom: 2rem;">
+    <div class="stat-card">
+        <span class="stat-label">Model ID</span>
+        <span class="stat-value" style="font-size: 1.15rem; word-break: break-all; margin-top: 0.5rem;">{{ run.model_id.replace('mlx-community/', '') }}</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-label">Voice Condition</span>
+        <span class="stat-value" style="font-size: 1.15rem; color: var(--neon-cyan); margin-top: 0.5rem;">{{ run.voice }}</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-label">MLX Engine</span>
+        <span class="stat-value" style="font-size: 1.15rem; color: var(--neon-purple); margin-top: 0.5rem;">v{{ run.mlx_version or 'unknown' }}</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-label">Executed At</span>
+        <span class="stat-value" style="font-size: 1.15rem; color: var(--text-secondary); margin-top: 0.5rem;">{{ run.created_at }}</span>
+    </div>
+</div>
+
+<!-- Interactive Charts Layout -->
+<div class="card grid-cols-2" style="margin-bottom: 2rem; gap: 1.5rem;">
+    <div>
+        <div class="card-title" style="font-size: 1rem; margin-bottom: 1rem;">
+            <span>Latency Comparison: TTFA vs Total Time</span>
+            <span class="badge badge-cyan">seconds (lower is better)</span>
+        </div>
+        <div style="position: relative; height: 280px; width: 100%;">
+            <canvas id="latencyChart"></canvas>
+        </div>
+    </div>
+    <div>
+        <div class="card-title" style="font-size: 1rem; margin-bottom: 1rem;">
+            <span>Streaming Speedup Factor</span>
+            <span class="badge badge-blue">ratio (higher is better)</span>
+        </div>
+        <div style="position: relative; height: 280px; width: 100%;">
+            <canvas id="speedupChart"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Raw Data Table -->
+<div class="card">
+    <div class="card-title" style="margin-bottom: 1.5rem;">
+        <span>Performance & Latency Breakdown</span>
+        <span class="badge badge-cyan">data table</span>
+    </div>
+    <div class="table-responsive">
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>Character Length</th>
+                    <th>Streaming TTFA (s)</th>
+                    <th>Non-Streaming Total (s)</th>
+                    <th>Latency Reduction Speedup</th>
+                    <th>First Chunk Audio (s)</th>
+                    <th>Peak Memory (GB)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for m in measurements %}
+                <tr>
+                    <td style="font-weight: 600;">{{ m.text_length | format_number }} char</td>
+                    <td style="color: var(--neon-cyan); font-weight: 600;">{{ "%.3f"|format(m.ttfa_sec) }} s</td>
+                    <td style="color: var(--text-secondary);">{{ "%.3f"|format(m.total_sec) }} s</td>
+                    <td style="color: var(--neon-cyan); font-weight: 600;">{{ m.speedup_ratio }}x</td>
+                    <td>{{ "%.2f"|format(m.first_chunk_duration) }} s</td>
+                    <td style="color: var(--neon-danger); font-weight: 500;">
+                        {% if m.peak_gb is not none %}
+                        {{ "%.2f"|format(m.peak_gb) }} GB
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // Collect data points
+    const labels = [{% for m in measurements %}{{ m.text_length }}{% if not loop.last %}, {% endif %}{% endfor %}].map(l => l.toLocaleString() + ' char');
+    const ttfaData = [{% for m in measurements %}{{ m.ttfa_sec }}{% if not loop.last %}, {% endif %}{% endfor %}];
+    const totalData = [{% for m in measurements %}{{ m.total_sec }}{% if not loop.last %}, {% endif %}{% endfor %}];
+    const speedupData = [{% for m in measurements %}{{ m.speedup_ratio }}{% if not loop.last %}, {% endif %}{% endfor %}];
+
+    // 1. Latency Comparison Chart (Line Chart with 2 Datasets)
+    const latCtx = document.getElementById('latencyChart').getContext('2d');
+    new Chart(latCtx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Streaming TTFA (s)',
+                    data: ttfaData,
+                    borderColor: 'rgba(0, 240, 255, 1)',
+                    backgroundColor: 'rgba(0, 240, 255, 0.1)',
+                    borderWidth: 2.5,
+                    tension: 0.15,
+                    fill: false,
+                    pointBackgroundColor: 'rgba(0, 240, 255, 1)',
+                    pointBorderColor: '#ffffff'
+                },
+                {
+                    label: 'Non-Streaming Total (s)',
+                    data: totalData,
+                    borderColor: 'rgba(239, 68, 68, 1)',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderWidth: 2.5,
+                    tension: 0.15,
+                    fill: false,
+                    pointBackgroundColor: 'rgba(239, 68, 68, 1)',
+                    pointBorderColor: '#ffffff'
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    labels: { color: '#a0aec0', font: { family: 'Outfit', size: 11 } }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(10, 8, 20, 0.95)',
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
+                    borderColor: 'rgba(255, 255, 255, 0.1)',
+                    borderWidth: 1,
+                    titleFont: { family: 'Outfit', weight: 'bold' },
+                    bodyFont: { family: 'Outfit' }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                    ticks: { color: '#a0aec0', font: { family: 'Outfit', size: 10 } }
+                },
+                y: {
+                    grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                    ticks: { color: '#a0aec0', font: { family: 'Outfit', size: 10 } }
+                }
+            }
+        }
+    });
+
+    // 2. Speedup Factor Chart
+    const speedCtx = document.getElementById('speedupChart').getContext('2d');
+    new Chart(speedCtx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Speedup Ratio',
+                data: speedupData,
+                borderColor: 'rgba(56, 189, 248, 1)',
+                backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                borderWidth: 2.5,
+                tension: 0.15,
+                fill: true,
+                pointBackgroundColor: 'rgba(56, 189, 248, 1)',
+                pointBorderColor: '#ffffff'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: 'rgba(10, 8, 20, 0.95)',
+                    titleColor: '#ffffff',
+                    bodyColor: '#ffffff',
+                    borderColor: 'rgba(255, 255, 255, 0.1)',
+                    borderWidth: 1,
+                    titleFont: { family: 'Outfit', weight: 'bold' },
+                    bodyFont: { family: 'Outfit' }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                    ticks: { color: '#a0aec0', font: { family: 'Outfit', size: 10 } }
+                },
+                y: {
+                    grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                    ticks: { color: '#a0aec0', font: { family: 'Outfit', size: 10 } }
+                }
+            }
+        }
+    });
+});
+</script>
+{% endblock %}

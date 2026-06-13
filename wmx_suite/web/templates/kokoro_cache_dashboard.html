@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}Kokoro Cache Dashboard — Will's MLX Suite{% endblock %}
+
+{% block content %}
+<div class="header-area">
+    <div>
+        <h1 class="page-title">Kokoro Voice Cache Benchmarks</h1>
+        <p class="page-subtitle">Profile the memory overhead of loaded speaker style vectors inside RAM/Metal dynamically.</p>
+    </div>
+</div>
+
+<!-- Metrics Explanation -->
+<div class="card grid-cols-2" style="margin-bottom: 2rem; gap: 1.5rem;">
+    <div style="padding: 1rem;">
+        <h3 style="color: var(--neon-cyan); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span>💾</span> Voice Caching RAM Delta
+        </h3>
+        <p style="color: var(--text-secondary); font-size: 0.95rem; line-height: 1.5;">
+            Each speaker style vector loaded in MLX allocates GPU tensors and Metal buffers.
+            This benchmark sweeps the number of concurrently cached voices to measure the exact memory cost of a multi-speaker registry.
+        </p>
+    </div>
+    <div style="padding: 1rem;">
+        <h3 style="color: var(--neon-cyan); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span>🛡️</span> Prevention of OOM
+        </h3>
+        <p style="color: var(--text-secondary); font-size: 0.95rem; line-height: 1.5;">
+            By tracking the caching curve, co-running models can size their context budgets conservatively,
+            preventing the system from crossing the 17.18 GB working set wall.
+        </p>
+    </div>
+</div>
+
+<!-- Kokoro Cache Run History -->
+<div class="card">
+    <div class="card-title" style="margin-bottom: 1.5rem;">
+        <span>Completed Cache Benchmark Runs</span>
+        <span class="badge badge-cyan">Cache footprints</span>
+    </div>
+    <div class="table-responsive">
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>Run ID</th>
+                    <th>Model Identifier</th>
+                    <th>MLX Version</th>
+                    <th>Executed At</th>
+                    <th>Max Cached Voices</th>
+                    <th>Cache RAM Overhead</th>
+                    <th>Max OS Wired RAM</th>
+                    <th>Max Peak RAM</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in runs %}
+                <tr>
+                    <td style="font-weight: 600; color: var(--text-secondary);">#{{ r.id }}</td>
+                    <td style="font-weight: 500;">{{ r.model_id }}</td>
+                    <td><code>{{ r.mlx_version or 'unknown' }}</code></td>
+                    <td>{{ r.created_at }}</td>
+                    <td>{{ r.voices_cached }} voices</td>
+                    <td style="color: var(--neon-cyan); font-weight: 600;">
+                        {% if r.cache_overhead_gb is not none %}
+                        +{{ "%.3f"|format(r.cache_overhead_gb) }} GB
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--text-primary);">
+                        {% if r.max_wired_gb is not none %}
+                        {{ r.max_wired_gb }} GB
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--neon-danger);">
+                        {% if r.max_peak_gb is not none %}
+                        {{ r.max_peak_gb }} GB
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{{ url_for('kokoro_cache_run_detail', run_id=r.id) }}" class="btn btn-outline" style="padding: 0.4rem 0.8rem; font-size: 0.8rem; border-radius: 8px;">View Run</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 4rem 0;">
+                        No Kokoro voice cache benchmarks recorded yet. Run 
+                        <code style="background: rgba(0,0,0,0.3); padding: 0.3rem 0.6rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">uv run wmx-suite benchmark-kokoro-cache</code> 
+                        in your terminal to profile voice caching memory scaling.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

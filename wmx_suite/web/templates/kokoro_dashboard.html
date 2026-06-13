@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block title %}Kokoro TTS Dashboard — Will's MLX Suite{% endblock %}
+
+{% block content %}
+<div class="header-area">
+    <div>
+        <h1 class="page-title">Kokoro TTS Benchmarks</h1>
+        <p class="page-subtitle">Real-time speech synthesis throughput and factor benchmarking on Apple Silicon.</p>
+    </div>
+</div>
+
+<!-- Metrics Explanation -->
+<div class="card grid-cols-2" style="margin-bottom: 2rem; gap: 1.5rem;">
+    <div style="padding: 1rem;">
+        <h3 style="color: var(--neon-cyan); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span>⏱️</span> Real-Time Factor (RTF)
+        </h3>
+        <p style="color: var(--text-secondary); font-size: 0.95rem; line-height: 1.5;">
+            Calculated as <code>Compute Time / Audio Output Duration</code>. A value of <strong>1.0</strong> means real-time speed. 
+            A value of <strong>0.04</strong> means the audio generates 25x faster than real-time. <strong>Lower is better.</strong>
+        </p>
+    </div>
+    <div style="padding: 1rem;">
+        <h3 style="color: var(--neon-cyan); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span>⚡</span> Characters Per Second (CPS)
+        </h3>
+        <p style="color: var(--text-secondary); font-size: 0.95rem; line-height: 1.5;">
+            Calculated as <code>Utterance Length (char) / Compute Time</code>. Measures the character processing throughput. 
+            Allows easy scaling comparison across different sentence sizes. <strong>Higher is better.</strong>
+        </p>
+    </div>
+</div>
+
+<!-- Kokoro Run History -->
+<div class="card">
+    <div class="card-title" style="margin-bottom: 1.5rem;">
+        <span>Completed Benchmark Runs</span>
+        <span class="badge badge-cyan">TTS Inference</span>
+    </div>
+    <div class="table-responsive">
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>Run ID</th>
+                    <th>Model Identifier</th>
+                    <th>Voice</th>
+                    <th>MLX Version</th>
+                    <th>Executed At</th>
+                    <th>Rungs</th>
+                    <th>Avg RTF</th>
+                    <th>Avg CPS</th>
+                    <th>Max Peak Mem</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in runs %}
+                <tr>
+                    <td style="font-weight: 600; color: var(--text-secondary);">#{{ r.id }}</td>
+                    <td style="font-weight: 500;">{{ r.model_id }}</td>
+                    <td><span class="badge badge-purple">{{ r.voice }}</span></td>
+                    <td><code>{{ r.mlx_version or 'unknown' }}</code></td>
+                    <td>{{ r.created_at }}</td>
+                    <td>{{ r.n_sweeps }}</td>
+                    <td style="color: var(--neon-cyan); font-weight: 600;">
+                        {% if r.avg_rtf is not none %}
+                        {{ "%.4f"|format(r.avg_rtf) }}
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--text-primary); font-weight: 500;">
+                        {% if r.avg_cps is not none %}
+                        {{ r.avg_cps }} <span style="font-size: 0.8rem; color: var(--text-secondary);">char/s</span>
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--neon-danger);">
+                        {% if r.peak_gb is not none %}
+                        {{ r.peak_gb }} GB
+                        {% else %}
+                        n/a
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a href="{{ url_for('kokoro_run_detail', run_id=r.id) }}" class="btn btn-outline" style="padding: 0.4rem 0.8rem; font-size: 0.8rem; border-radius: 8px;">View Run</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 4rem 0;">
+                        No Kokoro benchmarks recorded yet. Run 
+                        <code style="background: rgba(0,0,0,0.3); padding: 0.3rem 0.6rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">uv run wmx-suite benchmark-kokoro</code> 
+                        in your terminal to profile model performance.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

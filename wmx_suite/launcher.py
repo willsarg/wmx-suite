@@ -74,6 +74,7 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
     margin_gb = config.margin_gb(margin_gb)
     limits = read_limits()
     threshold = limits.safe_threshold_gb(margin_gb)
+
     wall = limits.wall_gb
     live_base = sample_settled_baseline()
     kv_bits = KV_BITS if info.can_quantize_kv else None

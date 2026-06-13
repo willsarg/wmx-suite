@@ -76,6 +76,113 @@ CREATE TABLE IF NOT EXISTS fits (
     created_at       TEXT,
     FOREIGN KEY (run_id) REFERENCES probe_runs(id)
 );
+
+CREATE TABLE IF NOT EXISTS kokoro_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    voice       TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_measurements (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         INTEGER NOT NULL,
+    text_length    INTEGER NOT NULL,
+    audio_duration REAL NOT NULL,
+    compute_time   REAL NOT NULL,
+    rtf            REAL NOT NULL,
+    cps            REAL NOT NULL,
+    peak_gb        REAL,
+    FOREIGN KEY (run_id) REFERENCES kokoro_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_ttfa_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    voice       TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_ttfa_measurements (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id               INTEGER NOT NULL,
+    text_length          INTEGER NOT NULL,
+    ttfa_sec             REAL NOT NULL,
+    total_sec            REAL NOT NULL,
+    speedup_ratio        REAL NOT NULL,
+    first_chunk_duration REAL NOT NULL,
+    peak_gb              REAL,
+    FOREIGN KEY (run_id) REFERENCES kokoro_ttfa_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_batch_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    voice       TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_batch_measurements (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL,
+    batch_size  INTEGER NOT NULL,
+    total_time  REAL NOT NULL,
+    cps         REAL NOT NULL,
+    peak_gb     REAL NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES kokoro_batch_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_voice_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_voice_measurements (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL,
+    cond_type   TEXT NOT NULL,          -- static_baseline | warm_switch | cold_load
+    voice_from  TEXT NOT NULL,
+    voice_to    TEXT NOT NULL,
+    duration_ms REAL NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES kokoro_voice_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_cache_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_cache_measurements (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL,
+    cache_size  INTEGER NOT NULL,
+    os_wired_gb REAL NOT NULL,
+    peak_gb     REAL NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES kokoro_cache_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_baseline_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kokoro_baseline_measurements (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL,
+    baseline_gb REAL NOT NULL,
+    active_gb   REAL NOT NULL,
+    overhead_gb REAL NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES kokoro_baseline_runs(id) ON DELETE CASCADE
+);
 """
 
 
@@ -222,4 +329,310 @@ def get_model_runs_and_fits(con: sqlite3.Connection, hf_id: str) -> list[dict]:
         (hf_id,)
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def start_kokoro_run(con: sqlite3.Connection, model_id: str, voice: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO kokoro_runs (model_id, voice, mlx_version, created_at) VALUES (?, ?, ?, ?)",
+        (model_id, voice, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_kokoro_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    text_length: int,
+    audio_duration: float,
+    compute_time: float,
+    rtf: float,
+    cps: float,
+    peak_gb: float | None,
+) -> None:
+    con.execute(
+        "INSERT INTO kokoro_measurements (run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb),
+    )
+    con.commit()
+
+
+def get_all_kokoro_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, voice, mlx_version, created_at FROM kokoro_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_kokoro_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb "
+        "FROM kokoro_measurements WHERE run_id = ? ORDER BY text_length ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_kokoro_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, voice, mlx_version, created_at FROM kokoro_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def start_kokoro_ttfa_run(con: sqlite3.Connection, model_id: str, voice: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO kokoro_ttfa_runs (model_id, voice, mlx_version, created_at) VALUES (?, ?, ?, ?)",
+        (model_id, voice, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_kokoro_ttfa_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    text_length: int,
+    ttfa_sec: float,
+    total_sec: float,
+    speedup_ratio: float,
+    first_chunk_duration: float,
+    peak_gb: float | None,
+) -> None:
+    con.execute(
+        "INSERT INTO kokoro_ttfa_measurements (run_id, text_length, ttfa_sec, total_sec, speedup_ratio, first_chunk_duration, peak_gb) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (run_id, text_length, ttfa_sec, total_sec, speedup_ratio, first_chunk_duration, peak_gb),
+    )
+    con.commit()
+
+
+def get_all_kokoro_ttfa_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, voice, mlx_version, created_at FROM kokoro_ttfa_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_kokoro_ttfa_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, text_length, ttfa_sec, total_sec, speedup_ratio, first_chunk_duration, peak_gb "
+        "FROM kokoro_ttfa_measurements WHERE run_id = ? ORDER BY text_length ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_kokoro_ttfa_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, voice, mlx_version, created_at FROM kokoro_ttfa_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def start_kokoro_batch_run(con: sqlite3.Connection, model_id: str, voice: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO kokoro_batch_runs (model_id, voice, mlx_version, created_at) VALUES (?, ?, ?, ?)",
+        (model_id, voice, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_kokoro_batch_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    batch_size: int,
+    total_time: float,
+    cps: float,
+    peak_gb: float,
+) -> None:
+    con.execute(
+        "INSERT INTO kokoro_batch_measurements (run_id, batch_size, total_time, cps, peak_gb) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, batch_size, total_time, cps, peak_gb),
+    )
+    con.commit()
+
+
+def get_all_kokoro_batch_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, voice, mlx_version, created_at FROM kokoro_batch_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_kokoro_batch_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, batch_size, total_time, cps, peak_gb "
+        "FROM kokoro_batch_measurements WHERE run_id = ? ORDER BY batch_size ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_kokoro_batch_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, voice, mlx_version, created_at FROM kokoro_batch_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# --- Kokoro Voice ---
+def start_kokoro_voice_run(con: sqlite3.Connection, model_id: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO kokoro_voice_runs (model_id, mlx_version, created_at) VALUES (?, ?, ?)",
+        (model_id, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_kokoro_voice_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    cond_type: str,
+    voice_from: str,
+    voice_to: str,
+    duration_ms: float,
+) -> None:
+    con.execute(
+        "INSERT INTO kokoro_voice_measurements (run_id, cond_type, voice_from, voice_to, duration_ms) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, cond_type, voice_from, voice_to, duration_ms),
+    )
+    con.commit()
+
+
+def get_all_kokoro_voice_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM kokoro_voice_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_kokoro_voice_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, cond_type, voice_from, voice_to, duration_ms "
+        "FROM kokoro_voice_measurements WHERE run_id = ? ORDER BY id ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_kokoro_voice_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM kokoro_voice_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# --- Kokoro Cache ---
+def start_kokoro_cache_run(con: sqlite3.Connection, model_id: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO kokoro_cache_runs (model_id, mlx_version, created_at) VALUES (?, ?, ?)",
+        (model_id, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_kokoro_cache_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    cache_size: int,
+    os_wired_gb: float,
+    peak_gb: float,
+) -> None:
+    con.execute(
+        "INSERT INTO kokoro_cache_measurements (run_id, cache_size, os_wired_gb, peak_gb) "
+        "VALUES (?, ?, ?, ?)",
+        (run_id, cache_size, os_wired_gb, peak_gb),
+    )
+    con.commit()
+
+
+def get_all_kokoro_cache_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM kokoro_cache_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_kokoro_cache_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, cache_size, os_wired_gb, peak_gb "
+        "FROM kokoro_cache_measurements WHERE run_id = ? ORDER BY cache_size ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_kokoro_cache_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM kokoro_cache_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# --- Kokoro Baseline ---
+def start_kokoro_baseline_run(con: sqlite3.Connection, model_id: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO kokoro_baseline_runs (model_id, mlx_version, created_at) VALUES (?, ?, ?)",
+        (model_id, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_kokoro_baseline_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    baseline_gb: float,
+    active_gb: float,
+    overhead_gb: float,
+) -> None:
+    con.execute(
+        "INSERT INTO kokoro_baseline_measurements (run_id, baseline_gb, active_gb, overhead_gb) "
+        "VALUES (?, ?, ?, ?)",
+        (run_id, baseline_gb, active_gb, overhead_gb),
+    )
+    con.commit()
+
+
+def get_all_kokoro_baseline_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM kokoro_baseline_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_kokoro_baseline_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, baseline_gb, active_gb, overhead_gb "
+        "FROM kokoro_baseline_measurements WHERE run_id = ? ORDER BY id ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_kokoro_baseline_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM kokoro_baseline_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_latest_kokoro_baseline(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT m.id, m.run_id, m.baseline_gb, m.active_gb, m.overhead_gb "
+        "FROM kokoro_baseline_measurements m JOIN kokoro_baseline_runs r ON m.run_id = r.id "
+        "ORDER BY r.id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+
+
 

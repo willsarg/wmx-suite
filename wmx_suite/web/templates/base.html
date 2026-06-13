@@ -29,6 +29,36 @@
                     <span>⚖️</span> Compare
                 </a>
             </li>
+            <li class="nav-item {% if request.path.startswith('/kokoro') and not request.path.startswith('/kokoro-ttfa') and not request.path.startswith('/kokoro-batch') and not request.path.startswith('/kokoro-voice') and not request.path.startswith('/kokoro-cache') and not request.path.startswith('/kokoro-baseline') %}active{% endif %}">
+                <a href="{{ url_for('kokoro_dashboard') }}">
+                    <span>🔊</span> Kokoro TTS
+                </a>
+            </li>
+            <li class="nav-item {% if request.path.startswith('/kokoro-ttfa') %}active{% endif %}">
+                <a href="{{ url_for('kokoro_ttfa_dashboard') }}">
+                    <span>⚡</span> Kokoro TTFA
+                </a>
+            </li>
+            <li class="nav-item {% if request.path.startswith('/kokoro-batch') %}active{% endif %}">
+                <a href="{{ url_for('kokoro_batch_dashboard') }}">
+                    <span>📈</span> Kokoro Batch
+                </a>
+            </li>
+            <li class="nav-item {% if request.path.startswith('/kokoro-voice') %}active{% endif %}">
+                <a href="{{ url_for('kokoro_voice_dashboard') }}">
+                    <span>🗣️</span> Kokoro Voice
+                </a>
+            </li>
+            <li class="nav-item {% if request.path.startswith('/kokoro-cache') %}active{% endif %}">
+                <a href="{{ url_for('kokoro_cache_dashboard') }}">
+                    <span>💾</span> Kokoro Cache
+                </a>
+            </li>
+            <li class="nav-item {% if request.path.startswith('/kokoro-baseline') %}active{% endif %}">
+                <a href="{{ url_for('kokoro_baseline_dashboard') }}">
+                    <span>⚖️</span> Kokoro Baseline
+                </a>
+            </li>
         </ul>
         
         <!-- Live System Widget -->
