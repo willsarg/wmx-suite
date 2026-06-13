@@ -304,8 +304,11 @@ def test_health_uses_environment_margin(monkeypatch, capsys):
     )
 
     class EmptyConnection:
-        def execute(self, _sql):
+        def execute(self, _sql, _params=()):
             return self
+
+        def fetchone(self):
+            return None
 
         def fetchall(self):
             return []
@@ -652,3 +655,38 @@ def test_cmd_calibrate_propagates_no_model_error(monkeypatch):
     monkeypatch.setattr(probe, "calibrate", boom)
     with pytest.raises(SystemExit, match="no causal"):
         cli.cmd_calibrate(SimpleNamespace(model=None, margin=None))
+
+
+def _limits(*, wall_gb=17.0, wired_now_gb=3.0, **kwargs):
+    return SystemLimits(
+        device="Apple M4 Pro",
+        total_gb=24.0,
+        wall_gb=wall_gb,
+        max_buffer_gb=8.0,
+        swap_free_gb=3.0,
+        wired_now_gb=wired_now_gb,
+    )
+
+
+def test_health_warns_when_no_profile(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+    from wmx_suite import cli, db, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 25769803776, 15))
+    monkeypatch.setattr(cli, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+    monkeypatch.setattr(cli, "sample_settled_baseline", lambda: 3.0)
+    cli.cmd_health(SimpleNamespace(margin=None))
+    out = capsys.readouterr().out
+    assert "No calibration profile" in out
+    assert "calibrate" in out
+
+
+def test_system_reports_no_profile(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+    from wmx_suite import cli, db, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 25769803776, 15))
+    monkeypatch.setattr(cli, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+    cli.cmd_system(SimpleNamespace())
+    out = capsys.readouterr().out
+    assert "calibration profile" in out.lower()

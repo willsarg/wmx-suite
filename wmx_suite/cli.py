@@ -24,7 +24,7 @@ from statistics import median
 
 from mlx_lm.utils import load_tokenizer
 
-from . import config, db, launcher, models, probe
+from . import config, db, launcher, models, probe, profiles
 from .system import read_limits, sample_settled_baseline
 
 
@@ -108,6 +108,13 @@ def cmd_system(_):
     print(f"wired now (baseline): {s.wired_now_gb:.2f} GB")
     print(f"safe threshold       : {s.safe_threshold_gb(margin):.2f} GB  "
           f"(wall − {margin:g}GB margin)")
+    con = db.connect()
+    prof = db.get_profile(con, profiles.machine_key())
+    if prof:
+        print(f"calibration profile : overhead {prof['fixed_overhead_gb']:.2f} GB "
+              f"(model {prof['model_id']}, {prof['calibrated_at']})")
+    else:
+        print("calibration profile : none — using M4-Pro defaults; run 'wmx-suite calibrate'")
 
 
 def cmd_health(args):
@@ -137,6 +144,10 @@ def cmd_health(args):
     print(f"free headroom       : {threshold - live_base:.2f} GB  (threshold − wired now)")
 
     con = db.connect()
+    if db.get_profile(con, profiles.machine_key()) is None:
+        dev, ram, osv = profiles.machine_key()
+        print(f"\nNo calibration profile for {dev}/{ram / 1e9:.0f}GB/macOS {osv}; "
+              "cold-start estimates use M4-Pro defaults. Run 'wmx-suite calibrate'.")
     rows = con.execute(
         "SELECT DISTINCT m.hf_id, m.max_context FROM models m "
         "JOIN probe_runs r ON r.hf_id = m.hf_id JOIN fits f ON f.run_id = r.id "
@@ -1035,6 +1046,9 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
     print(f"[run] live_base {p['live_base_gb']}GB + model {p['model_base_gb']}GB = "
           f"{p['base_abs_gb']}GB  |  slope {p['slope_gb_per_k']}GB/1k  |  "
           f"wall {p['wall_gb']}GB  threshold {p['threshold_gb']}GB", file=sys.stderr)
+    if p["source"] == "estimated" and p.get("cold_start_profile") == "default":
+        print("[run] WARNING: using default cold-start constants tuned for Apple M4 Pro; "
+              "run 'wmx-suite calibrate' to tune them for this machine.", file=sys.stderr)
 
     if p.get("refuse"):
         print(f"[run] REFUSED: {p['reason']}", file=sys.stderr)
