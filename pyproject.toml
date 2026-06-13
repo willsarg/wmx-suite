@@ -3,6 +3,9 @@ name = "wills-mlx-suite"
 version = "0.1.0"
 description = "Custom memory/stress bench for local MLX inference on Apple Silicon — finds safe context ceilings without crashing the machine."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Will Sarg" }]
 requires-python = ">=3.12"
 dependencies = [
     "mlx-lm>=0.31",
