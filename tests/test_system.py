@@ -1,5 +1,6 @@
 import pytest
 
+from wmx_suite import system
 from wmx_suite.system import SystemLimits
 
 
@@ -21,3 +22,13 @@ def test_safe_threshold_uses_default_two_gb_margin():
 
 def test_safe_threshold_uses_requested_margin():
     assert _limits(20.0).safe_threshold_gb(3.5) == pytest.approx(16.5)
+
+
+def test_macos_major_parses_version(monkeypatch):
+    monkeypatch.setattr("platform.mac_ver", lambda: ("15.7.4", ("", "", ""), "arm64"))
+    assert system.macos_major() == 15
+
+
+def test_macos_major_returns_zero_when_undetectable(monkeypatch):
+    monkeypatch.setattr("platform.mac_ver", lambda: ("", ("", "", ""), ""))
+    assert system.macos_major() == 0

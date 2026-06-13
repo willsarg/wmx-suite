@@ -40,6 +40,20 @@ def device_limits() -> dict:
     }
 
 
+def macos_major() -> int:
+    """Major macOS version (e.g. 15), or 0 if undetectable.
+
+    Part of the per-machine profile key: a major OS bump shifts the ambient
+    wired baseline enough to invalidate a stored cold-start overhead.
+    """
+    import platform
+    try:
+        ver = platform.mac_ver()[0]
+        return int(ver.split(".")[0]) if ver else 0
+    except (ValueError, IndexError):
+        return 0
+
+
 def swap_free_gb() -> float | None:
     try:
         out = subprocess.check_output(["sysctl", "vm.swapusage"]).decode()
