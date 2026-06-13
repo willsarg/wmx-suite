@@ -46,8 +46,10 @@ def predict(*, model_base_gb: float, slope_gb_per_k: float, live_base_gb: float,
     """
     base_abs = live_base_gb + model_base_gb
     headroom = threshold_gb - base_abs
-    if slope_gb_per_k > 0:
-        cap = int(max(0.0, headroom / slope_gb_per_k) * 1000)
+    if headroom <= 0:
+        cap = 0
+    elif slope_gb_per_k > 0:
+        cap = int(headroom / slope_gb_per_k * 1000)
     else:
         cap = model_max or 0
     if model_max:
@@ -108,11 +110,62 @@ def plan(hf_id: str, *, margin_gb: float = 2.0) -> dict:
     return p
 
 
-def build_argv(rest: list[str], p: dict) -> list[str]:
-    """Inject --kv-bits (only if quantizable) and --max-kv-size, respecting user overrides."""
+class LaunchArgumentError(ValueError):
+    """A passthrough argument violates the launcher's safety policy."""
+
+
+def _option_values(argv: list[str], option: str) -> list[str | None]:
+    values: list[str | None] = []
+    prefix = option + "="
+    for index, arg in enumerate(argv):
+        if arg == option:
+            value = argv[index + 1] if index + 1 < len(argv) else None
+            values.append(None if value is not None and value.startswith("--") else value)
+        elif arg.startswith(prefix):
+            values.append(arg[len(prefix):])
+    return values
+
+
+def _single_int_option(argv: list[str], option: str) -> int | None:
+    values = _option_values(argv, option)
+    if len(values) > 1:
+        raise LaunchArgumentError(f"{option} may be provided only once")
+    if not values:
+        return None
+    value = values[0]
+    try:
+        parsed = int(value) if value is not None else None
+    except ValueError as exc:
+        raise LaunchArgumentError(f"{option} requires an integer") from exc
+    if parsed is None or parsed < 0:
+        raise LaunchArgumentError(f"{option} requires a non-negative integer")
+    return parsed
+
+
+def build_argv(rest: list[str], p: dict, *, force: bool = False) -> list[str]:
+    """Validate safety-sensitive passthrough args and inject planned defaults."""
     argv = list(rest)
-    if p["kv_bits"] is not None and "--kv-bits" not in argv:
+    user_kv_bits = _single_int_option(argv, "--kv-bits")
+    user_max_kv = _single_int_option(argv, "--max-kv-size")
+
+    if p["kv_bits"] is None and user_kv_bits is not None:
+        raise LaunchArgumentError(
+            "--kv-bits is not supported because this model's cache is not quantizable"
+        )
+    if user_max_kv is not None and user_max_kv > p["max_kv_size"] and not force:
+        raise LaunchArgumentError(
+            f"--max-kv-size {user_max_kv:,} exceeds planned cap "
+            f"{p['max_kv_size']:,}; pass --force to override"
+        )
+
+    for option in ("--draft-model", "--prompt-cache-file", "--adapter-path"):
+        if _option_values(argv, option) and not force:
+            raise LaunchArgumentError(
+                f"{option} changes unmeasured memory behavior; pass --force to override"
+            )
+
+    if p["kv_bits"] is not None and user_kv_bits is None:
         argv = ["--kv-bits", str(p["kv_bits"])] + argv
-    if "--max-kv-size" not in argv:
+    if user_max_kv is None:
         argv = ["--max-kv-size", str(p["max_kv_size"])] + argv
     return argv

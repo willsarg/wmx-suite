@@ -283,7 +283,10 @@ def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool, log: boo
             sys.exit(2)
         print("[run] --force given; proceeding against safety advice.", file=sys.stderr)
 
-    argv = launcher.build_argv(rest, p)
+    try:
+        argv = launcher.build_argv(rest, p, force=force)
+    except launcher.LaunchArgumentError as exc:
+        raise SystemExit(f"[run] REFUSED: {exc}") from exc
     print(f"[run] max-kv-size {p['max_kv_size']:,} tokens (model cap {p['model_max']:,})",
           file=sys.stderr)
     print(f"[run] exec: mlx_lm.generate {' '.join(argv)}\n", file=sys.stderr)

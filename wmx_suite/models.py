@@ -84,7 +84,11 @@ def describe(hf_id: str) -> ModelInfo | None:
     lt = Counter(layer_types)
     n_layers = t.get("num_hidden_layers", len(layer_types))
     growing = lt.get("full_attention", 0) if layer_types else n_layers
-    has_sliding = ("sliding_window" in t) or (lt.get("sliding_attention", 0) > 0)
+    sliding_enabled = t.get("use_sliding_window", True)
+    has_sliding = (
+        (sliding_enabled is not False and bool(t.get("sliding_window")))
+        or lt.get("sliding_attention", 0) > 0
+    )
     return ModelInfo(
         hf_id=hf_id,
         weights_gb=round(weights_gb(hf_id), 2),
