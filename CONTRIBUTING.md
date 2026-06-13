@@ -26,11 +26,11 @@ treat it as **safety-critical**:
 - Include `--dry-run` output (the plan) in your PR so reviewers can see the predicted
   ceiling without anyone having to run into the wall.
 
-## Especially wanted: data from your machine
+## Especially wanted: benchmark results from other Macs
 
 The biggest gap is that the pre-flight estimate constants are calibrated on one M4 Pro.
 To make wmx-suite trustworthy on other SKUs (M1/M2/M3/M4 × base/Pro/Max/Ultra × RAM
-tiers), we need real measurements from real hardware. See issues
+tiers), we need memory-benchmark numbers from real hardware. See issues
 [#9](https://github.com/willsarg/wmx-suite/issues/9) (per-machine calibration) and
 [#10](https://github.com/willsarg/wmx-suite/issues/10) (community profile registry).
 
@@ -38,11 +38,12 @@ If you have an Apple Silicon Mac, the most useful thing you can do is:
 
 1. Run `uv run wmx-suite system` and `uv run wmx-suite characterize <model>` on a couple
    of `mlx-community` models.
-2. Open an issue with your **chip + RAM**, the reported wall, and the fitted
+2. Open an issue with your **chip + RAM tier**, the reported memory wall, and the fitted
    `model_base` / `slope` / ceiling for each model.
 
-That data is what an opt-in profile registry will eventually be built from — earned
-empirically, not hardcoded.
+These are just hardware capability numbers — memory limits and per-model curves. Nothing
+personal: no filenames, prompts, or anything identifying. That's all an opt-in profile
+registry would ever collect, so predictions are earned empirically instead of hardcoded.
 
 ## Development setup
 
