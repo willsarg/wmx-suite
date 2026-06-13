@@ -205,6 +205,22 @@ def cmd_characterize(args):
                        repeats=args.repeats)
 
 
+def cmd_calibrate(args):
+    """Measure this machine's cold-start overhead and store a per-machine profile."""
+    margin = _configured_margin(args.margin)
+    result = probe.calibrate(args.model, margin_gb=margin)
+    dev, ram, osv = result["machine_key"]
+    print("=" * 60)
+    print("  Calibrated cold-start overhead for this machine")
+    print("=" * 60)
+    print(f"  Machine    : {dev} / {ram / 1e9:.0f}GB / macOS {osv}")
+    print(f"  Model used : {result['hf_id']} ({result['n_points']} rungs)")
+    print(f"  Measured   : {result['measured_overhead_gb']:.2f} GB overhead "
+          f"(default {result['default_overhead_gb']:.2f} GB)")
+    print(f"  Stored     : {result['fixed_overhead_gb']:.2f} GB  (floored at default)")
+    print("=" * 60)
+
+
 def cmd_list(_):
     con = db.connect()
     rows = db.latest_fits(con)
@@ -1104,6 +1120,12 @@ def _main_argparse():
                         "(smooths prefill-transient jitter)")
     p.set_defaults(func=cmd_characterize)
     sub.add_parser("list").set_defaults(func=cmd_list)
+    p = sub.add_parser("calibrate", help="measure this machine's cold-start overhead constant")
+    p.add_argument("--model", default=None,
+                   help="model to calibrate with (default: smallest cached causal model)")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_calibrate)
     p = sub.add_parser("web", help="Launch the Flask web UI dashboard")
     p.add_argument("--host", default="127.0.0.1", help="Host interface to bind to")
     p.add_argument("--port", type=int, default=5001, help="Port to listen on")
