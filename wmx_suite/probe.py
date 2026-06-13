@@ -77,7 +77,7 @@ def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits) -> float:
 
 
 def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, *, verbose, log) -> dict | None:
-    cmd = [py, "-m", "wills_mlx_suite.probe_worker", hf_id, str(ctx)]
+    cmd = [py, "-m", "wmx_suite.probe_worker", hf_id, str(ctx)]
     if kv_bits is not None:
         cmd += ["--kv-bits", str(kv_bits)]
     out = subprocess.run(cmd, capture_output=True, text=True)

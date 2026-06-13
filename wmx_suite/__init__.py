@@ -1,4 +1,4 @@
-"""Will's MLX Suite — a custom memory/stress bench for local MLX inference on Apple Silicon.
+"""Will's MLX Suite (wmx-suite) — a custom memory/stress bench for local MLX inference on Apple Silicon.
 
 First rule: never crash the laptop. The suite finds each model's safe context ceiling
 by extrapolating from measurements taken well below the hardware wall — it never probes

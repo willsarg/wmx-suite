@@ -766,7 +766,7 @@ wheels = [
 ]
 
 [[package]]
-name = "wills-mlx-suite"
+name = "wmx-suite"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

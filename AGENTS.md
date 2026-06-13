@@ -48,12 +48,12 @@ This overrides convenience, speed, and completeness. Concretely:
 
 ```bash
 uv sync                                   # install deps into .venv
-uv run mlx-suite system                   # machine wall, swap, baseline
-uv run mlx-suite scan                     # register mlx-community models from HF cache
-uv run mlx-suite show <hf_id>             # architecture + memory class
-uv run mlx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)
-uv run mlx-suite list                     # ceilings from the DB
-uv run mlx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
+uv run wmx-suite system                   # machine wall, swap, baseline
+uv run wmx-suite scan                     # register mlx-community models from HF cache
+uv run wmx-suite show <hf_id>             # architecture + memory class
+uv run wmx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)
+uv run wmx-suite list                     # ceilings from the DB
+uv run wmx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
 ```
 
 **`run` is the only sanctioned way to launch a model.** It replaced the old standalone
@@ -76,7 +76,7 @@ the user's own risk. Never call `mlx_lm.generate` directly at non-trivial contex
 ## Architecture
 
 ```
-wills_mlx_suite/
+wmx_suite/
   system.py         # device wall, swap, current wired memory
   models.py         # HF-cache config reader + memory-class classifier
   db.py             # SQLite schema: models, probe_runs, measurements, fits
@@ -105,3 +105,9 @@ cli.py run    # parses passthrough args, prints the plan, execs mlx_lm.generate
   `FIXED_OVERHEAD_GB`) and `launcher.PREFILL_SPIKE_MULT` as more models are characterized.
 - `run`'s uncharacterized-model fallback uses a conservative analytic estimate; prefer
   running `characterize` first for any model you'll use seriously.
+
+## Trademarks
+
+MLX, Apple Silicon, Metal, Mac, and macOS are trademarks of Apple Inc. This project is an
+independent community tool, not affiliated with or endorsed by Apple. Name references are
+descriptive only. See the README "Trademarks" section.

@@ -1,5 +1,5 @@
 [project]
-name = "wills-mlx-suite"
+name = "wmx-suite"
 version = "0.1.0"
 description = "Custom memory/stress bench for local MLX inference on Apple Silicon — finds safe context ceilings without crashing the machine."
 readme = "README.md"
@@ -15,11 +15,11 @@ dependencies = [
 web = ["flask>=3.0"]
 
 [project.scripts]
-mlx-suite = "wills_mlx_suite.cli:main"
+wmx-suite = "wmx_suite.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["wills_mlx_suite"]
+packages = ["wmx_suite"]

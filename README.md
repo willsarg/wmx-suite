@@ -33,12 +33,12 @@ under it.
 
 ```bash
 uv sync                                   # install deps into .venv
-uv run mlx-suite system                   # show the machine's wall, swap, baseline
-uv run mlx-suite scan                     # register mlx-community models from the HF cache
-uv run mlx-suite show <hf_id>             # architecture + memory class
-uv run mlx-suite characterize <hf_id>     # safe probe -> fitted context ceiling
-uv run mlx-suite list                     # ceilings for everything characterized
-uv run mlx-suite run --model <hf_id> ...  # safely launch mlx_lm.generate (replaces mlx_safe)
+uv run wmx-suite system                   # show the machine's wall, swap, baseline
+uv run wmx-suite scan                     # register mlx-community models from the HF cache
+uv run wmx-suite show <hf_id>             # architecture + memory class
+uv run wmx-suite characterize <hf_id>     # safe probe -> fitted context ceiling
+uv run wmx-suite list                     # ceilings for everything characterized
+uv run wmx-suite run --model <hf_id> ...  # safely launch mlx_lm.generate (replaces mlx_safe)
 ```
 
 `characterize` refuses to launch any probe whose pre-flight base estimate already
@@ -58,14 +58,14 @@ predicted, never run into the wall).
   `--force` overrides at your own risk, `--dry-run` prints the plan without launching.
 
 ```bash
-uv run mlx-suite run --model mlx-community/Qwen3.5-9B-OptiQ-4bit --prompt "..." --max-tokens 200
-uv run mlx-suite run --dry-run --model <hf_id> --prompt "..."   # inspect the plan only
+uv run wmx-suite run --model mlx-community/Qwen3.5-9B-OptiQ-4bit --prompt "..." --max-tokens 200
+uv run wmx-suite run --dry-run --model <hf_id> --prompt "..."   # inspect the plan only
 ```
 
 ## Layout
 
 ```
-wills_mlx_suite/
+wmx_suite/
   system.py         # device wall, swap, current wired memory
   models.py         # HF-cache config reader + memory-class classifier
   db.py             # SQLite schema: models, probe_runs, measurements, fits
@@ -80,3 +80,11 @@ data/suite.db       # results (gitignored)
 v0 scaffold. Validated methodology: predicted Gemma's ceiling to within 0.5% from safe
 probes. Calibration of the pre-flight base estimate refines as more models are run.
 Flask UI (`web` extra) is optional and not yet built.
+
+## Trademarks
+
+MLX, Apple Silicon, Metal, Mac, and macOS are trademarks of Apple Inc. This project is
+an independent, community tool — it is **not affiliated with, endorsed by, or sponsored
+by Apple Inc.** References to these names are descriptive only, to indicate the
+technologies the suite works with. All other trademarks are the property of their
+respective owners.

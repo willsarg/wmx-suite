@@ -1,10 +1,10 @@
 """Command-line entry point for the suite.
 
-    uv run mlx-suite system                 # show the machine's memory wall + swap
-    uv run mlx-suite scan                    # register all mlx-community models in the cache
-    uv run mlx-suite show <hf_id>            # architecture + memory class for one model
-    uv run mlx-suite characterize <hf_id>   # safe probe -> fitted context ceiling
-    uv run mlx-suite list                    # characterized models + ceilings from the DB
+    uv run wmx-suite system                 # show the machine's memory wall + swap
+    uv run wmx-suite scan                    # register all mlx-community models in the cache
+    uv run wmx-suite show <hf_id>            # architecture + memory class for one model
+    uv run wmx-suite characterize <hf_id>   # safe probe -> fitted context ceiling
+    uv run wmx-suite list                    # characterized models + ceilings from the DB
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def cmd_list(_):
               f"wall≈{r['hard_wall_ctx']:>7,}  (R²={r['r2']})")
 
 
-RUN_HELP = """usage: mlx-suite run [--margin GB] [--force] [--dry-run] -- <mlx_lm.generate args>
+RUN_HELP = """usage: wmx-suite run [--margin GB] [--force] [--dry-run] -- <mlx_lm.generate args>
 
 Safely launch mlx_lm.generate (replaces the old mlx_safe). Picks kv-bits by cache type,
 caps --max-kv-size from the measured ceiling, and refuses if the run would breach the wall.
@@ -153,7 +153,7 @@ def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool):
 
 
 def _main_argparse():
-    ap = argparse.ArgumentParser(prog="mlx-suite")
+    ap = argparse.ArgumentParser(prog="wmx-suite")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("system").set_defaults(func=cmd_system)
     sub.add_parser("scan").set_defaults(func=cmd_scan)

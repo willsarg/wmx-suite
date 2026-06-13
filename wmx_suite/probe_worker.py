@@ -4,7 +4,7 @@ Run as a subprocess — one fresh process per context — so wired-memory residu
 previous context never contaminates the high-water reading. Prints one JSON line.
 
 Usage:
-    python -m wills_mlx_suite.probe_worker <hf_id> <context> [--kv-bits N]
+    python -m wmx_suite.probe_worker <hf_id> <context> [--kv-bits N]
 """
 from __future__ import annotations
 
