@@ -1,0 +1,90 @@
+# Agent guide — Will's MLX Suite
+
+Orientation for any AI agent working in this repo. Read this before running anything.
+
+## What this project is
+
+A custom memory/stress bench for local MLX inference on an **M4 Pro MacBook (24 GB)**.
+It finds each model's **safe context ceiling** so we never run a model+context that
+crashes the machine. It does this by **extrapolating from safe measurements**, never by
+probing into the danger zone.
+
+## RULE #1 — NEVER CRASH THE LAPTOP
+
+This overrides convenience, speed, and completeness. Concretely:
+
+- **Never launch a model run whose predicted OS-wired peak exceeds the safe threshold**
+  (`wall − 2 GB` ≈ 15.18 GB). Use `probe.characterize()` / the pre-flight gate; do not
+  call `mlx_lm` directly at high context to "just see."
+- **The crash wall is `max_recommended_working_set_size` ≈ 17.18 GB**, not total RAM.
+  MLX wires (non-swappable) Metal buffers; swap is ~1 GB, so crossing the wall can
+  **hard-lock or kernel-panic the machine**, not fail gracefully.
+- **Do not `sudo sysctl iogpu.wired_limit_mb=...` to raise the ceiling** without explicit
+  user approval — it eats the OS floor and makes a hard lock *more* likely.
+- When in doubt, probe **smaller** first and let the extrapolation tell you the ceiling.
+
+## Core facts the design encodes (don't re-derive, don't contradict)
+
+- **Danger metric = OS-wired high-water** (`vm_stat` "Pages wired down"). MLX's
+  `get_peak_memory()` undercounts true footprint by ~40% (excludes the buffer cache,
+  which the OS still wires). `mlx_true = active + cache` is closer but still misses the
+  prefill transient.
+- **The prefill spike** (transient buffers while chewing the prompt) drives the crash and
+  grows several× faster than steady-state KV. It's invisible in MLX's reported peak.
+- **Two memory classes:**
+  - **RotatingKVCache** (sliding-window: Gemma, GPT-OSS) → **cannot quantize KV**.
+    `--kv-bits 4` raises `NotImplementedError` at `quantized_kv_start` (5000 tokens), so
+    it crashes any longer prompt. These models must run **fp16 KV**. Their sliding window
+    caps most layers, so growth is already gentle.
+  - **standard KVCache** (linear+full: Qwen3.5 9B/27B) → quantizes fine; 4-bit lowers
+    high-context memory but has a transient spike at the 5k quantization threshold.
+  - `models.describe()` classifies this automatically — trust `can_quantize_kv`.
+- **Only `full_attention` layers** grow KV with context (sliding = window-capped,
+  linear = fixed recurrent state).
+- **Measure in isolated subprocesses** — one fresh process per context. Reusing a process
+  leaves wired residue that inflates the next reading (`probe_worker.py` exists for this).
+
+## Commands
+
+```bash
+uv sync                                   # install deps into .venv
+uv run mlx-suite system                   # machine wall, swap, baseline
+uv run mlx-suite scan                     # register mlx-community models from HF cache
+uv run mlx-suite show <hf_id>             # architecture + memory class
+uv run mlx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)
+uv run mlx-suite list                     # ceilings from the DB
+```
+
+## Conventions (Will's global prefs — enforce them)
+
+- **Python packages: use `uv` only. NEVER `--break-system-packages`.**
+- **HuggingFace CLI: use `hf`, not the deprecated `huggingface-cli`.**
+- Stick to **`mlx-community`** models.
+- SQLite is the datastore (`data/suite.db`, gitignored). Flask is optional (`web` extra),
+  only add a UI if asked.
+- Match **production inference settings** when measuring: `mlx_safe` forces `--kv-bits 4`
+  with `kv_group_size=64`, `quantized_kv_start=5000` — but only for quantizable models.
+
+## Architecture
+
+```
+wills_mlx_suite/
+  system.py         # device wall, swap, current wired memory
+  models.py         # HF-cache config reader + memory-class classifier
+  db.py             # SQLite schema: models, probe_runs, measurements, fits
+  probe_worker.py   # ONE isolated (model, context) measurement -> JSON line
+  probe.py          # safe ramp orchestrator + linear fit + ceiling solve
+  cli.py            # entry point
+```
+
+Data flow: `scan/describe` → register model → `characterize` ramps context safely,
+storing each measurement and a fitted line (`os_wired = intercept + slope·context`) →
+solve for safe ceiling and hard wall.
+
+## Known open work
+
+- Calibrate the pre-flight base estimate in `probe.py` (`RESIDENT_FACTOR`,
+  `FIXED_OVERHEAD_GB`) as more models are characterized.
+- The external `mlx_safe` wrapper (`~/bin/mlx_safe`) has two bugs this suite should
+  inform a fix for: (1) it forces `--kv-bits 4` on RotatingKVCache models (crash),
+  (2) it budgets against MLX peak instead of os_wired (unsafe).
