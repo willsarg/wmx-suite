@@ -12,8 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from . import config, db, models
-from .probe import FIXED_OVERHEAD_GB, RESIDENT_FACTOR
+from . import config, db, models, profiles
 from .system import read_limits, sample_settled_baseline
 
 # Measured: the OS-wired slope is dominated by the prefill transient, ~5x the analytic
@@ -81,13 +80,15 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
 
     con = db.connect()
     fit = db.latest_fit(con, hf_id)
+    cold_source = None
     if fit and fit.get("slope_gb_per_k"):
         model_base = float(fit["model_base_gb"])
         slope = float(fit["slope_gb_per_k"])
         source = "measured"
         fit_stale = models.fit_is_stale(hf_id, fit.get("characterized_at"))
     else:
-        model_base = info.weights_gb * RESIDENT_FACTOR + FIXED_OVERHEAD_GB
+        factor, overhead, cold_source = profiles.cold_start_constants(con)
+        model_base = info.weights_gb * factor + overhead
         slope = _estimated_slope_gb_per_k(info)
         source = "estimated"
         fit_stale = False
@@ -96,7 +97,7 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
                    threshold_gb=threshold, wall_gb=wall, model_max=info.max_context)
     p = {
         "hf_id": hf_id, "kv_bits": kv_bits, "source": source,
-        "fit_stale": fit_stale,
+        "fit_stale": fit_stale, "cold_start_profile": cold_source,
         "max_kv_size_enforced": info.max_kv_size_enforced,
         "kv_group_size": KV_GROUP_SIZE, "quantized_kv_start": QUANTIZED_KV_START,
         "cache_type": info.cache_type, "model_max": info.max_context,

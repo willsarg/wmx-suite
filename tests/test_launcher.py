@@ -1,6 +1,6 @@
 import pytest
 
-from wmx_suite import launcher, models
+from wmx_suite import launcher, models, profiles
 from wmx_suite.system import SystemLimits
 
 
@@ -35,6 +35,10 @@ def _install_plan_fakes(monkeypatch, *, info, fit, live_base=3.0):
     monkeypatch.setattr(launcher.db, "connect", lambda: object())
     monkeypatch.setattr(launcher.db, "latest_fit", lambda _con, _hf_id: fit)
     monkeypatch.setattr(launcher.models, "fit_is_stale", lambda _hf_id, _created: False)
+    monkeypatch.setattr(
+        launcher.profiles, "cold_start_constants",
+        lambda _con: (profiles.DEFAULT_RESIDENT_FACTOR, profiles.DEFAULT_FIXED_OVERHEAD_GB, "default"),
+    )
 
 
 def _plan_dict(*, kv_bits=4, max_kv_size=4096):
@@ -208,7 +212,7 @@ def test_plan_uses_estimate_for_uncharacterized_model(monkeypatch):
     result = launcher.plan("mlx-community/test")
     assert result["source"] == "estimated"
     assert result["model_base_gb"] == round(
-        info.weights_gb * launcher.RESIDENT_FACTOR + launcher.FIXED_OVERHEAD_GB,
+        info.weights_gb * profiles.DEFAULT_RESIDENT_FACTOR + profiles.DEFAULT_FIXED_OVERHEAD_GB,
         2,
     )
 
@@ -535,3 +539,30 @@ def test_build_argv_allows_unmeasured_modes_with_force():
     args = ["--model", "x", "--adapter-path", "adapter"]
     result = launcher.build_argv(args, _plan_dict(), force=True)
     assert result[-4:] == args
+
+
+def test_plan_estimated_marks_cold_start_source(monkeypatch, tmp_path):
+    from wmx_suite import db, profiles as prof
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(prof, "machine_key", lambda: ("Apple M4 Pro", 1, 15))
+    info = _model_info(weights_gb=2.0)
+    monkeypatch.setattr(models, "describe", lambda hf_id: info)
+    limits = SystemLimits(
+        device="test",
+        total_gb=24.0,
+        wall_gb=17.0,
+        max_buffer_gb=8.0,
+        swap_free_gb=1.0,
+        wired_now_gb=3.0,
+    )
+    monkeypatch.setattr(launcher, "read_limits", lambda: limits)
+    monkeypatch.setattr(launcher, "sample_settled_baseline", lambda: 3.0)
+
+    p = launcher.plan("mlx-community/test")
+    assert p["source"] == "estimated"
+    assert p["cold_start_profile"] == "default"
+
+    db.upsert_profile(db.connect(), ("Apple M4 Pro", 1, 15), resident_factor=1.05,
+                      fixed_overhead_gb=1.0, model_id="m", n_points=2, mlx_version="9.9")
+    p2 = launcher.plan("mlx-community/test")
+    assert p2["cold_start_profile"] == "profile"
