@@ -21,6 +21,8 @@ import sys
 import termios
 from statistics import median
 
+from mlx_lm.utils import load_tokenizer
+
 from . import config, db, launcher, models, probe
 from .system import read_limits, sample_settled_baseline
 
@@ -307,14 +309,53 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
         argv = launcher.build_argv(rest, p, force=force)
     except launcher.LaunchArgumentError as exc:
         raise SystemExit(f"[run] REFUSED: {exc}") from exc
-    print(f"[run] max-kv-size {p['max_kv_size']:,} tokens (model cap {p['model_max']:,})",
-          file=sys.stderr)
+    effective_cap = launcher.effective_max_kv_size(rest, p)
+    prompt_check = None
+    try:
+        tokenizer = load_tokenizer(
+            model_id,
+            tokenizer_config_extra=launcher.tokenizer_config(rest),
+        )
+        prompt_check = launcher.check_prompt(rest, p, tokenizer)
+    except launcher.LaunchArgumentError as exc:
+        if not force:
+            raise SystemExit(f"[run] REFUSED: {exc}") from exc
+        print(f"[run] WARNING: prompt preflight bypassed: {exc}", file=sys.stderr)
+    except Exception as exc:
+        if not force:
+            raise SystemExit(
+                f"[run] REFUSED: prompt tokenization failed: {exc}; "
+                "pass --force to bypass prompt preflight"
+            ) from exc
+        print(f"[run] WARNING: prompt tokenization failed and was bypassed: {exc}",
+              file=sys.stderr)
+    if not p.get("max_kv_size_enforced", True):
+        print("[run] WARNING: this model's custom MLX cache does not enforce "
+              "--max-kv-size", file=sys.stderr)
+    if prompt_check is not None:
+        print(f"[run] prompt {prompt_check.tokens:,} tokens "
+              f"({prompt_check.tokens / prompt_check.cap:.0%} of cap)",
+              file=sys.stderr)
+        if prompt_check.tokens > prompt_check.cap:
+            message = (f"prompt is {prompt_check.tokens:,} tokens, above "
+                       f"the {prompt_check.cap:,}-token cap")
+            if not force:
+                raise SystemExit(f"[run] REFUSED: {message}")
+            print(f"[run] WARNING: {message}; --force is overriding this refusal",
+                  file=sys.stderr)
+        if prompt_check.warn:
+            print(f"[run] WARNING: prompt exceeds "
+                  f"{launcher.PROMPT_WARNING_FRACTION:.0%} of the context cap",
+                  file=sys.stderr)
+    enforcement = "" if p.get("max_kv_size_enforced", True) else " (NOT runtime-enforced)"
+    print(f"[run] max-kv-size {effective_cap:,} tokens{enforcement} "
+          f"(model cap {p['model_max']:,})", file=sys.stderr)
     print(f"[run] exec: mlx_lm.generate {' '.join(argv)}\n", file=sys.stderr)
     if dry_run:
         print("[run] --dry-run: not launching.", file=sys.stderr)
         return
     if log:
-        _exec_logged(argv, model_id, p["max_kv_size"])
+        _exec_logged(argv, model_id, effective_cap)
     else:
         os.execvp("mlx_lm.generate", ["mlx_lm.generate"] + argv)
 

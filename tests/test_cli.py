@@ -6,10 +6,28 @@ from wmx_suite import cli, config
 from wmx_suite.system import SystemLimits
 
 
+class _Tokenizer:
+    has_chat_template = False
+
+    def encode(self, prompt, **_kwargs):
+        return prompt.split()
+
+
+@pytest.fixture(autouse=True)
+def _stub_tokenizer_loader(monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "load_tokenizer",
+        lambda _model, tokenizer_config_extra=None: _Tokenizer(),
+    )
+
+
 def _plan():
     return {
         "hf_id": "mlx-community/test",
         "kv_bits": 4,
+        "kv_group_size": 64,
+        "quantized_kv_start": 5000,
         "source": "measured",
         "cache_type": "standard",
         "model_max": 32768,
@@ -21,6 +39,7 @@ def _plan():
         "wall_gb": 17.0,
         "max_kv_size": 4096,
         "fit_stale": False,
+        "max_kv_size_enforced": True,
         "refuse": False,
     }
 
@@ -42,6 +61,88 @@ def test_run_reports_launch_argument_refusal(monkeypatch):
             force=False,
             dry_run=True,
         )
+
+
+def test_run_refuses_prompt_above_cap(monkeypatch):
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "build_argv", lambda rest, plan, *, force: rest)
+    monkeypatch.setattr(
+        cli.launcher,
+        "check_prompt",
+        lambda rest, plan, tokenizer: cli.launcher.PromptCheck(
+            tokens=4097, cap=4096, warn=True
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_tokenizer",
+        lambda _model, tokenizer_config_extra=None: object(),
+    )
+
+    with pytest.raises(SystemExit, match="above the 4,096-token cap"):
+        cli._run(
+            ["--model", "mlx-community/test", "--prompt", "large"],
+            margin=2.0,
+            force=False,
+            dry_run=True,
+        )
+
+
+def test_run_warns_when_prompt_is_near_cap(monkeypatch, capsys):
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "build_argv", lambda rest, plan, *, force: rest)
+    monkeypatch.setattr(
+        cli.launcher,
+        "check_prompt",
+        lambda rest, plan, tokenizer: cli.launcher.PromptCheck(
+            tokens=3500, cap=4096, warn=True
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "load_tokenizer",
+        lambda _model, tokenizer_config_extra=None: object(),
+    )
+
+    cli._run(
+        ["--model", "mlx-community/test", "--prompt", "large"],
+        margin=2.0,
+        force=False,
+        dry_run=True,
+    )
+
+    assert "prompt exceeds 80% of the context cap" in capsys.readouterr().err
+
+
+def test_run_force_bypasses_unverifiable_prompt_with_warning(monkeypatch, capsys):
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "build_argv", lambda rest, plan, *, force: rest)
+
+    cli._run(
+        ["--model", "mlx-community/test", "--prompt", "-"],
+        margin=2.0,
+        force=True,
+        dry_run=True,
+    )
+
+    assert "prompt preflight bypassed" in capsys.readouterr().err
+
+
+def test_run_reports_effective_user_cap(monkeypatch, capsys):
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+
+    cli._run(
+        [
+            "--model", "mlx-community/test",
+            "--prompt", "small",
+            "--max-kv-size", "2048",
+        ],
+        margin=2.0,
+        force=False,
+        dry_run=True,
+    )
+
+    assert "max-kv-size 2,048 tokens" in capsys.readouterr().err
 
 
 def test_run_passes_force_to_argument_validation(monkeypatch):

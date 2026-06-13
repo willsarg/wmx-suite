@@ -9,6 +9,7 @@ Two failure modes a naive launcher hits, and how we avoid them:
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from . import config, db, models
@@ -23,6 +24,7 @@ MIN_USEFUL_CTX = 512
 KV_BITS = 4
 KV_GROUP_SIZE = 64
 QUANTIZED_KV_START = 5000
+PROMPT_WARNING_FRACTION = 0.8
 
 
 def _estimated_slope_gb_per_k(info: models.ModelInfo) -> float:
@@ -92,6 +94,7 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
     p = {
         "hf_id": hf_id, "kv_bits": kv_bits, "source": source,
         "fit_stale": fit_stale,
+        "max_kv_size_enforced": info.max_kv_size_enforced,
         "kv_group_size": KV_GROUP_SIZE, "quantized_kv_start": QUANTIZED_KV_START,
         "cache_type": info.cache_type, "model_max": info.max_context,
         "live_base_gb": round(live_base, 2), "model_base_gb": round(model_base, 2),
@@ -122,6 +125,13 @@ class LaunchArgumentError(ValueError):
     """A passthrough argument violates the launcher's safety policy."""
 
 
+@dataclass(frozen=True)
+class PromptCheck:
+    tokens: int
+    cap: int
+    warn: bool
+
+
 def _option_values(argv: list[str], option: str) -> list[str | None]:
     values: list[str | None] = []
     prefix = option + "="
@@ -150,6 +160,86 @@ def _single_int_option(argv: list[str], option: str) -> int | None:
     return parsed
 
 
+def _single_option(argv: list[str], *options: str) -> str | None:
+    values: list[str | None] = []
+    for option in options:
+        values.extend(_option_values(argv, option))
+    if len(values) > 1:
+        raise LaunchArgumentError(f"{'/'.join(options)} may be provided only once")
+    if not values:
+        return None
+    if values[0] is None:
+        raise LaunchArgumentError(f"{options[0]} requires a value")
+    return values[0]
+
+
+def check_prompt(argv: list[str], p: dict, tokenizer) -> PromptCheck:
+    """Count the prompt exactly as mlx_lm.generate prepares it, without loading weights."""
+    if _option_values(argv, "--prompt-cache-file"):
+        raise LaunchArgumentError(
+            "prompt length cannot be verified with --prompt-cache-file; pass --force to override"
+        )
+
+    prompt = _single_option(argv, "--prompt", "-p")
+    if prompt is None:
+        from mlx_lm.generate import DEFAULT_PROMPT
+        prompt = DEFAULT_PROMPT
+    if prompt == "-":
+        raise LaunchArgumentError(
+            "prompt length cannot be verified from stdin; pass --force to override"
+        )
+    prompt = prompt.replace("\\n", "\n").replace("\\t", "\t")
+
+    ignore_template = bool(_option_values(argv, "--ignore-chat-template"))
+    if not ignore_template and tokenizer.has_chat_template:
+        system_prompt = _single_option(argv, "--system-prompt")
+        prefill = _single_option(argv, "--prefill-response")
+        messages = []
+        if system_prompt is not None:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        if prefill is not None:
+            messages.append({"role": "assistant", "content": prefill})
+        template_config = _single_option(argv, "--chat-template-config")
+        try:
+            template_kwargs = json.loads(template_config) if template_config else {}
+        except json.JSONDecodeError as exc:
+            raise LaunchArgumentError("--chat-template-config requires valid JSON") from exc
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            continue_final_message=prefill is not None,
+            add_generation_prompt=prefill is None,
+            **template_kwargs,
+        )
+        tokens = tokenizer.encode(prompt, add_special_tokens=False)
+    else:
+        tokens = tokenizer.encode(prompt)
+
+    cap = effective_max_kv_size(argv, p)
+    count = len(tokens)
+    return PromptCheck(
+        tokens=count,
+        cap=cap,
+        warn=count > cap * PROMPT_WARNING_FRACTION,
+    )
+
+
+def effective_max_kv_size(argv: list[str], p: dict) -> int:
+    """Return the cap mlx_lm.generate will receive after launcher validation."""
+    user_cap = _single_int_option(argv, "--max-kv-size")
+    return user_cap if user_cap is not None else p["max_kv_size"]
+
+
+def tokenizer_config(argv: list[str]) -> dict:
+    """Mirror the tokenizer-specific configuration used by mlx_lm.generate."""
+    return {
+        "trust_remote_code": True
+        if _option_values(argv, "--trust-remote-code")
+        else None
+    }
+
+
 def build_argv(rest: list[str], p: dict, *, force: bool = False) -> list[str]:
     """Validate safety-sensitive passthrough args and inject planned defaults."""
     argv = list(rest)
@@ -157,6 +247,12 @@ def build_argv(rest: list[str], p: dict, *, force: bool = False) -> list[str]:
     user_kv_group_size = _single_int_option(argv, "--kv-group-size")
     user_quantized_kv_start = _single_int_option(argv, "--quantized-kv-start")
     user_max_kv = _single_int_option(argv, "--max-kv-size")
+
+    if not p.get("max_kv_size_enforced", True) and not force:
+        raise LaunchArgumentError(
+            "this model's custom MLX cache does not enforce --max-kv-size; "
+            "pass --force to launch without a verified runtime cap"
+        )
 
     kv_options = {
         "--kv-bits": user_kv_bits,

@@ -43,6 +43,7 @@ def _plan_dict(*, kv_bits=4, max_kv_size=4096):
         "kv_group_size": launcher.KV_GROUP_SIZE,
         "quantized_kv_start": launcher.QUANTIZED_KV_START,
         "max_kv_size": max_kv_size,
+        "max_kv_size_enforced": True,
     }
 
 
@@ -264,6 +265,100 @@ def test_build_argv_injects_planned_values(args):
         "--kv-bits",
         "4",
     ]
+
+
+def test_build_argv_refuses_unenforced_custom_cache_without_force():
+    plan = {**_plan_dict(), "max_kv_size_enforced": False}
+    with pytest.raises(launcher.LaunchArgumentError, match="does not enforce"):
+        launcher.build_argv(["--model", "x"], plan, force=False)
+
+
+def test_build_argv_allows_unenforced_custom_cache_with_force():
+    plan = {**_plan_dict(), "max_kv_size_enforced": False}
+    assert "--max-kv-size" in launcher.build_argv(["--model", "x"], plan, force=True)
+
+
+class _Tokenizer:
+    has_chat_template = False
+
+    def encode(self, prompt, **_kwargs):
+        return prompt.split()
+
+
+def test_check_prompt_counts_literal_prompt_against_user_cap():
+    result = launcher.check_prompt(
+        ["--model", "x", "--prompt", "one two three", "--max-kv-size", "3"],
+        _plan_dict(),
+        _Tokenizer(),
+    )
+    assert result == launcher.PromptCheck(tokens=3, cap=3, warn=True)
+
+
+def test_effective_max_kv_size_prefers_lower_user_value():
+    assert launcher.effective_max_kv_size(
+        ["--model", "x", "--max-kv-size", "2048"],
+        _plan_dict(max_kv_size=4096),
+    ) == 2048
+
+
+def test_check_prompt_warning_boundary_is_strictly_above_eighty_percent():
+    plan = _plan_dict(max_kv_size=10)
+    assert launcher.check_prompt(
+        ["--model", "x", "--prompt", "1 2 3 4 5 6 7 8"], plan, _Tokenizer()
+    ).warn is False
+    assert launcher.check_prompt(
+        ["--model", "x", "--prompt", "1 2 3 4 5 6 7 8 9"], plan, _Tokenizer()
+    ).warn is True
+
+
+def test_check_prompt_applies_chat_template_like_mlx_generate():
+    class ChatTokenizer:
+        has_chat_template = True
+
+        def apply_chat_template(self, messages, **kwargs):
+            assert messages == [
+                {"role": "system", "content": "rules"},
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "start"},
+            ]
+            assert kwargs["continue_final_message"] is True
+            assert kwargs["add_generation_prompt"] is False
+            return "templated prompt"
+
+        def encode(self, prompt, **kwargs):
+            assert kwargs == {"add_special_tokens": False}
+            return prompt.split()
+
+    result = launcher.check_prompt(
+        [
+            "--model", "x", "--prompt", "hello", "--system-prompt", "rules",
+            "--prefill-response", "start",
+        ],
+        _plan_dict(),
+        ChatTokenizer(),
+    )
+    assert result.tokens == 2
+
+
+def test_tokenizer_config_mirrors_trust_remote_code_flag():
+    assert launcher.tokenizer_config(["--model", "x"]) == {
+        "trust_remote_code": None
+    }
+    assert launcher.tokenizer_config(["--model", "x", "--trust-remote-code"]) == {
+        "trust_remote_code": True
+    }
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--model", "x", "--prompt", "-"],
+        ["--model", "x", "--prompt-cache-file", "cache.safetensors"],
+    ],
+)
+def test_check_prompt_rejects_sources_that_cannot_be_fully_preflighted(args):
+    with pytest.raises(launcher.LaunchArgumentError, match="pass --force"):
+        launcher.check_prompt(args, _plan_dict(), _Tokenizer())
 
 
 @pytest.mark.parametrize(

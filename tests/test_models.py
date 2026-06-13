@@ -8,7 +8,7 @@ from wmx_suite import models
 
 
 def _describe(monkeypatch, config):
-    monkeypatch.setattr(models, "_read_config", lambda _hf_id: config)
+    monkeypatch.setattr(models, "_read_raw_config", lambda _hf_id: config)
     monkeypatch.setattr(models, "weights_gb", lambda _hf_id: 4.25)
     return models.describe("mlx-community/test")
 
@@ -54,6 +54,20 @@ def test_explicitly_disabled_sliding_window_is_standard(monkeypatch):
     )
     assert info.cache_type == "standard"
     assert info.can_quantize_kv is True
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"model_type": "qwen3_5", "num_hidden_layers": 4},
+        {
+            "model_type": "qwen3_5",
+            "text_config": {"model_type": "qwen3_5_text", "num_hidden_layers": 4},
+        },
+    ],
+)
+def test_qwen35_custom_cache_does_not_enforce_max_kv_size(monkeypatch, config):
+    assert _describe(monkeypatch, config).max_kv_size_enforced is False
 
 
 def test_read_config_selects_nested_text_config(monkeypatch, tmp_path):

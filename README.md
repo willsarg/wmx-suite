@@ -92,6 +92,10 @@ exceeds the safe threshold — this is how oversized models (like the 27B) are h
   **measured** curve from `suite.db` (or a conservative estimate, with a warning, if
   uncharacterized);
 - **refuses** to launch if the model would breach the wall just to load (e.g. the 27B).
+- tokenizes ordinary prompts before launch, warns above 80% of the effective context
+  cap, and refuses prompts above it;
+- refuses models such as Qwen3.5 whose custom MLX cache does not currently enforce
+  `--max-kv-size`, unless `--force` explicitly accepts the unbounded runtime cache.
 
 ```bash
 # launch safely
@@ -102,6 +106,8 @@ uv run wmx-suite run --dry-run --model <hf_id> --prompt "..."
 ```
 
 > `--force` overrides a refusal at your own risk; `--dry-run` prints the plan without launching.
+> Stdin prompts and prompt-cache files require `--force` because their complete effective
+> prompt cannot be verified by the tokenizer preflight.
 
 Every successful run records its prompt/generation **tokens-per-second** to the database
 (output still streams live — it runs under a PTY so the experience is unchanged). `list`

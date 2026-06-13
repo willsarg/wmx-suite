@@ -22,6 +22,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 
 HUB = os.path.expanduser("~/.cache/huggingface/hub")
+UNBOUNDED_CUSTOM_CACHE_TYPES = {"qwen3_5", "qwen3_5_text"}
 
 
 @dataclass
@@ -37,6 +38,7 @@ class ModelInfo:
     cache_type: str              # "RotatingKVCache" | "standard"
     can_quantize_kv: bool        # False => must run fp16 KV (do NOT pass --kv-bits 4)
     layer_types: dict
+    max_kv_size_enforced: bool = True
 
     def fp16_kv_bytes_per_token(self) -> float:
         """Analytic fp16 KV-cache growth per token (K and V), counting only growing layers.
@@ -101,20 +103,27 @@ def weights_gb(hf_id: str) -> float:
     return total / 1e9
 
 
-def _read_config(hf_id: str) -> dict | None:
+def _read_raw_config(hf_id: str) -> dict | None:
     cfgs = glob.glob(os.path.join(_cache_dir(hf_id), "snapshots", "*", "config.json"))
     if not cfgs:
         return None
     with open(cfgs[0]) as fh:
-        c = json.load(fh)
+        return json.load(fh)
+
+
+def _read_config(hf_id: str) -> dict | None:
+    c = _read_raw_config(hf_id)
+    if c is None:
+        return None
     # Gemma/VLM nest the text model config
     return c.get("text_config", c) if isinstance(c.get("text_config"), dict) else c
 
 
 def describe(hf_id: str) -> ModelInfo | None:
-    t = _read_config(hf_id)
-    if t is None:
+    raw = _read_raw_config(hf_id)
+    if raw is None:
         return None
+    t = raw.get("text_config", raw) if isinstance(raw.get("text_config"), dict) else raw
     layer_types = t.get("layer_types", []) or []
     lt = Counter(layer_types)
     n_layers = t.get("num_hidden_layers", len(layer_types))
@@ -136,6 +145,10 @@ def describe(hf_id: str) -> ModelInfo | None:
         cache_type="RotatingKVCache" if has_sliding else "standard",
         can_quantize_kv=not has_sliding,
         layer_types=dict(lt),
+        max_kv_size_enforced=(
+            raw.get("model_type") not in UNBOUNDED_CUSTOM_CACHE_TYPES
+            and t.get("model_type") not in UNBOUNDED_CUSTOM_CACHE_TYPES
+        ),
     )
 
 

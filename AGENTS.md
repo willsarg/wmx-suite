@@ -138,6 +138,12 @@ against the latest characterization run. Unused blobs, mutable `refs/`, and `.no
 metadata are ignored. A newer cache produces a warning only; it never auto-runs
 `characterize`.
 
+Before launch, `run` loads only the tokenizer and counts the effective prompt after the
+chat template. It warns above 80% of the selected cap and refuses above the cap. Stdin
+and prompt-cache inputs require `--force` because their complete effective prompt cannot
+be verified. Qwen3.5 is also refused unless forced while its custom MLX cache ignores
+`--max-kv-size`; never describe that planned value as a runtime-enforced cap.
+
 ## Known open work
 
 - Calibrate the pre-flight base estimate in `probe.py` (`RESIDENT_FACTOR`,
