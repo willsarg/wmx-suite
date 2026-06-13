@@ -272,7 +272,9 @@ def test_run_rejects_invalid_environment_margin(monkeypatch):
         )
 
 
-def test_system_displays_configured_margin(monkeypatch, capsys):
+def test_system_displays_configured_margin(monkeypatch, tmp_path, capsys):
+    from wmx_suite import db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
     monkeypatch.setenv(config.MARGIN_ENV, "3")
     monkeypatch.setattr(
         cli,

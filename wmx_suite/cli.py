@@ -144,8 +144,9 @@ def cmd_health(args):
     print(f"free headroom       : {threshold - live_base:.2f} GB  (threshold − wired now)")
 
     con = db.connect()
-    if db.get_profile(con, profiles.machine_key()) is None:
-        dev, ram, osv = profiles.machine_key()
+    key = profiles.machine_key()
+    if db.get_profile(con, key) is None:
+        dev, ram, osv = key
         print(f"\nNo calibration profile for {dev}/{ram / 1e9:.0f}GB/macOS {osv}; "
               "cold-start estimates use M4-Pro defaults. Run 'wmx-suite calibrate'.")
     rows = con.execute(
