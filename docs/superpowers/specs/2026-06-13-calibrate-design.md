@@ -61,8 +61,11 @@ import from there (removes the current `launcher → probe` constant import).
 ### `profiles.py`
 
 ```python
-DEFAULT_RESIDENT_FACTOR = 1.05      # weights→resident memory, ~universal
-DEFAULT_FIXED_OVERHEAD_GB = 1.0     # framework/Metal/python base, M4-Pro-measured
+DEFAULT_RESIDENT_FACTOR = 1.05      # weights→resident memory; loose prior (effective
+                                    # factor measured 0.88–1.10 across models). HELD FIXED.
+DEFAULT_FIXED_OVERHEAD_GB = 1.0     # framework/Metal/python base; loose M4-Pro prior
+                                    # ("calibrated loosely" per probe.py), and the floor
+                                    # below which a calibrated overhead is never stored.
 
 def machine_key() -> tuple[str, int, int]:
     """(device_name, total_ram_bytes, macos_major) for the current machine."""
@@ -133,9 +136,22 @@ worker_python=None, verbose=True) -> dict`
    pre-flight refuses or the rung errors, abort with that reason (do not force).
 4. **Solve overhead at c→0.** `_linfit()` the two `(ctx_k, delta)` points → intercept
    `base_delta0`. Then
-   `fixed_overhead = max(0.0, base_delta0 − DEFAULT_RESIDENT_FACTOR * weights_gb)`.
+   `fixed_overhead = max(DEFAULT_FIXED_OVERHEAD_GB, base_delta0 − DEFAULT_RESIDENT_FACTOR * weights_gb)`.
    Using the fitted intercept (not a raw rung) removes the `slope·c` KV contribution,
-   so KV growth isn't folded into overhead.
+   so KV growth isn't folded into overhead. **Floored at the default (1.0 GB):**
+   calibration may only make the cold-start estimate *more* conservative than today's
+   M4 baseline, never less — for a purely-estimated run, too-low overhead is the unsafe
+   direction. (See "Why the fixed factor is acceptable" below for why the residual is
+   measured cleanly despite the factor being held constant.)
+
+**Why the fixed factor is acceptable.** Committed `fits` data shows the effective
+resident factor varies ~0.88–1.10 across measured models, so a single fixed 1.05 is an
+approximation. Choosing the *smallest* model neutralizes this for the overhead reading:
+with tiny weights, `1.05·weights` is small, so `base_delta0 ≈ true overhead` almost
+regardless of the factor. The factor remains an approximation for *large* uncharacterized
+models (≈ ±0.05·weights of slop), but that is inherent to a conservative cold-start
+heuristic — `characterize` measures the true `model_base`/`slope` and overrides it
+entirely, and the run-time "characterize now?" prompt nudges users there.
 5. **Persist** via `upsert_profile(...)` (`resident_factor = DEFAULT_RESIDENT_FACTOR`,
    `fixed_overhead_gb = fixed_overhead`, model id, `n_points = 2`, mlx version).
 6. **Return / print** a summary dict: machine key, measured overhead vs. the
@@ -166,6 +182,10 @@ The measured-fit branch (`source == "measured"`) is unchanged — characterized 
 never touch the cold-start constants, so `cold_start_profile` is only meaningful when
 `source == "estimated"`.
 
+Adding `con` to `estimate_base_gb` touches all three of its callers: `characterize`
+(`probe.py:154`) and two test sites (`tests/test_probe_math.py:71,76`) which currently
+pass only `(info, limits)`. Pass `con` (or accept `con=None` → open one) consistently.
+
 ## No-profile warning wiring
 
 - **`run` (`cli._run`)**: after planning, when `p["source"] == "estimated"` and
@@ -180,7 +200,8 @@ never touch the cold-start constants, so `cold_start_profile` is only meaningful
   Per-model verdicts are unchanged.
 - **`system` (`cli.cmd_system`)**: print one line stating whether a profile is active
   for this machine and, if so, its measured overhead and `calibrated_at` (read-only,
-  informational).
+  informational). Note: `cmd_system` opens no DB today, so this adds a `db.connect()`
+  there (read-only).
 
 ## CLI
 
@@ -201,8 +222,9 @@ the per-model per-machine adaptation.
 - **macOS version undetectable** → `macos_major = 0`; key stays stable and consistent.
 - **Pre-flight refuses even the smallest rung** (machine under heavy load) → abort with
   the refusal reason; do not force.
-- **Negative residual** (tiny model where `factor·weights` exceeds measured base, e.g.
-  measurement noise) → overhead clamped to `0.0`.
+- **Negative / low residual** (tiny model where `factor·weights` meets or exceeds the
+  measured base, or just a leaner machine) → overhead floored at `DEFAULT_FIXED_OVERHEAD_GB`
+  (1.0), per the safety policy that calibration only tightens, never loosens, the estimate.
 - **Re-running `calibrate`** → upsert replaces the row for this machine key.
 - **Stale profile after macOS/RAM change** → key no longer matches; falls back to
   defaults and the warning reappears, prompting re-calibration. (We do not delete old
