@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 from statistics import median
 
 from mlx_lm.utils import load_tokenizer
@@ -32,6 +33,67 @@ def _configured_margin(value=None) -> float:
         return config.margin_gb(value)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _stream_worker(
+    cmd: list[str],
+    on_line,
+    *,
+    capture_stderr: bool = True,
+) -> tuple[int, str]:
+    """Spawn *cmd* and stream its stdout line-by-line via *on_line(line)*.
+
+    Stderr is drained concurrently on a background thread so a large stderr
+    payload (e.g. MLX/Metal warnings or a traceback) can never fill the OS
+    pipe buffer and deadlock the parent.
+
+    If *on_line* returns a truthy value for a given line, *_stream_worker*
+    immediately terminates the child process (SIGTERM), stops consuming stdout,
+    and returns.  This is used by handlers to abort on a genuine ``error``
+    event so the worker cannot continue processing further rungs.
+
+    Returns ``(returncode, stderr_text)``.  If *capture_stderr* is False the
+    subprocess inherits the terminal's stderr (no deadlock risk, empty string
+    returned for stderr_text).
+
+    The caller is responsible for handling KeyboardInterrupt around this call
+    if it wants to terminate the child cleanly.
+    """
+    stderr_pipe = subprocess.PIPE if capture_stderr else None
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_pipe, text=True)
+
+    # Drain stderr on a background thread so it never fills (~64 KB limit).
+    stderr_buf: list[str] = []
+    if capture_stderr:
+        def _drain_stderr():
+            assert proc.stderr is not None
+            for chunk in iter(lambda: proc.stderr.read(4096), ""):
+                stderr_buf.append(chunk)
+            proc.stderr.close()
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if on_line(line):
+                # on_line signalled an abort: terminate the child so no further
+                # rungs are processed or persisted, then drain remaining stdout
+                # to avoid an OS pipe buffer deadlock before we close it.
+                proc.terminate()
+                for _ in proc.stdout:
+                    pass  # drain without processing
+                break
+    finally:
+        proc.stdout.close()
+
+    if capture_stderr:
+        stderr_thread.join()
+
+    proc.wait()
+    stderr_text = "".join(stderr_buf).strip() if capture_stderr else ""
+    return proc.returncode, stderr_text
 
 
 def cmd_system(_):
@@ -187,8 +249,6 @@ def cmd_web(args):
 def cmd_benchmark_kokoro(args):
     """Run Kokoro TTS performance sweep and log to database."""
     import json
-    import subprocess
-    import sys
 
     margin_val = _configured_margin(args.margin)
 
@@ -218,73 +278,74 @@ def cmd_benchmark_kokoro(args):
     con = db.connect()
     run_id = db.start_kokoro_run(con, args.model, args.voice, mlx_version)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
     print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
 
     table_header = "\n\n  Length (char) | Audio (s) | Compute (s) |   RTF   |   CPS   | Peak Mem (GB)\n  --------------+-----------+-------------+---------+---------+--------------"
     header_printed = False
+    safeguard_triggered = False
+    error_triggered = False
+
+    def on_line(raw_line):
+        nonlocal header_printed, safeguard_triggered, error_triggered
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+        status = data.get("status")
+        if status == "warmup_done":
+            print(" OK", end="", flush=True)
+        elif status == "safeguard_triggered":
+            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+            safeguard_triggered = True
+        elif status == "rung_done":
+            if not header_printed:
+                print(table_header)
+                header_printed = True
+
+            length = data["length"]
+            audio_dur = data["audio_duration"]
+            comp_time = data["compute_time"]
+            rtf = data["rtf"]
+            cps = data["cps"]
+            peak_gb = data["peak_gb"]
+
+            print(f"  {length:<13} | {audio_dur:<9.2f} | {comp_time:<11.2f} | {rtf:<7.4f} | {cps:<7.1f} | {peak_gb:<12.2f}")
+
+            db.add_kokoro_measurement(
+                con, run_id,
+                text_length=length,
+                audio_duration=audio_dur,
+                compute_time=comp_time,
+                rtf=rtf,
+                cps=cps,
+                peak_gb=peak_gb
+            )
+        elif status == "error":
+            print(f"\n  ERROR: {data.get('note')}")
+            error_triggered = True
+            return True  # signal _stream_worker to terminate the child immediately
+        return None
 
     try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            status = data.get("status")
-            if status == "warmup_done":
-                print(" OK", end="", flush=True)
-            elif status == "safeguard_triggered":
-                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
-                break
-            elif status == "rung_done":
-                if not header_printed:
-                    print(table_header)
-                    header_printed = True
-
-                length = data["length"]
-                audio_dur = data["audio_duration"]
-                comp_time = data["compute_time"]
-                rtf = data["rtf"]
-                cps = data["cps"]
-                peak_gb = data["peak_gb"]
-
-                print(f"  {length:<13} | {audio_dur:<9.2f} | {comp_time:<11.2f} | {rtf:<7.4f} | {cps:<7.1f} | {peak_gb:<12.2f}")
-
-                db.add_kokoro_measurement(
-                    con, run_id,
-                    text_length=length,
-                    audio_duration=audio_dur,
-                    compute_time=comp_time,
-                    rtf=rtf,
-                    cps=cps,
-                    peak_gb=peak_gb
-                )
-            elif status == "error":
-                print(f"\n  ERROR: {data.get('note')}")
-                proc.terminate()
-                sys.exit(1)
+        returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
         print("\n  Benchmark interrupted by user.")
-        proc.terminate()
         sys.exit(1)
 
+    if error_triggered:
+        sys.exit(1)
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read().strip()
-        print(f"\n  Worker exited with code {proc.returncode}.")
-        if err:
-            print(f"  Stderr: {err}")
-        sys.exit(proc.returncode)
+    if returncode != 0:
+        print(f"\n  Worker exited with code {returncode}.")
+        if stderr_text:
+            print(f"  Stderr: {stderr_text}")
+        sys.exit(returncode)
 
+    # safeguard_triggered is a successful early stop: fall through to the banner.
     print("============================================================")
     print(f"  Benchmark complete. Saved as Run ID: {run_id}")
     print("============================================================")
@@ -293,8 +354,6 @@ def cmd_benchmark_kokoro(args):
 def cmd_benchmark_kokoro_ttfa(args):
     """Run Kokoro TTS TTFA latency benchmark sweep and log to database."""
     import json
-    import subprocess
-    import sys
 
     margin_val = _configured_margin(args.margin)
 
@@ -324,72 +383,74 @@ def cmd_benchmark_kokoro_ttfa(args):
     con = db.connect()
     run_id = db.start_kokoro_ttfa_run(con, args.model, args.voice, mlx_version)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
     print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
 
     table_header = "\n\n  Length (char) | TTFA (s) | Total (s) | Speedup | First Chunk (s) | Peak Mem (GB)\n  --------------+----------+-----------+---------+-----------------+--------------"
     header_printed = False
+    safeguard_triggered = False
+    error_triggered = False
+
+    def on_line(raw_line):
+        nonlocal header_printed, safeguard_triggered, error_triggered
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+        status = data.get("status")
+        if status == "warmup_done":
+            print(" OK", end="", flush=True)
+        elif status == "safeguard_triggered":
+            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+            safeguard_triggered = True
+        elif status == "rung_done":
+            if not header_printed:
+                print(table_header)
+                header_printed = True
+
+            length = data["length"]
+            ttfa_sec = data["ttfa_sec"]
+            total_sec = data["total_sec"]
+            speedup = data["speedup_ratio"]
+            chunk_dur = data["first_chunk_duration"]
+            peak_gb = data["peak_gb"]
+
+            print(f"  {length:<13} | {ttfa_sec:<8.3f} | {total_sec:<9.3f} | {speedup:<7.1f}x | {chunk_dur:<15.2f} | {peak_gb:<12.2f}")
+
+            db.add_kokoro_ttfa_measurement(
+                con, run_id,
+                text_length=length,
+                ttfa_sec=ttfa_sec,
+                total_sec=total_sec,
+                speedup_ratio=speedup,
+                first_chunk_duration=chunk_dur,
+                peak_gb=peak_gb
+            )
+        elif status == "error":
+            print(f"\n  ERROR: {data.get('note')}")
+            error_triggered = True
+            return True  # signal _stream_worker to terminate the child immediately
+        return None
 
     try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            status = data.get("status")
-            if status == "warmup_done":
-                print(" OK", end="", flush=True)
-            elif status == "safeguard_triggered":
-                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
-                break
-            elif status == "rung_done":
-                if not header_printed:
-                    print(table_header)
-                    header_printed = True
-
-                length = data["length"]
-                ttfa_sec = data["ttfa_sec"]
-                total_sec = data["total_sec"]
-                speedup = data["speedup_ratio"]
-                chunk_dur = data["first_chunk_duration"]
-                peak_gb = data["peak_gb"]
-
-                print(f"  {length:<13} | {ttfa_sec:<8.3f} | {total_sec:<9.3f} | {speedup:<7.1f}x | {chunk_dur:<15.2f} | {peak_gb:<12.2f}")
-
-                db.add_kokoro_ttfa_measurement(
-                    con, run_id,
-                    text_length=length,
-                    ttfa_sec=ttfa_sec,
-                    total_sec=total_sec,
-                    speedup_ratio=speedup,
-                    first_chunk_duration=chunk_dur,
-                    peak_gb=peak_gb
-                )
-            elif status == "error":
-                print(f"\n  ERROR: {data.get('note')}")
-                proc.terminate()
-                sys.exit(1)
+        returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
         print("\n  Benchmark interrupted by user.")
-        proc.terminate()
         sys.exit(1)
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read().strip()
-        print(f"\n  Worker exited with code {proc.returncode}.")
-        if err:
-            print(f"  Stderr: {err}")
-        sys.exit(proc.returncode)
+    if error_triggered:
+        sys.exit(1)
 
+    if returncode != 0:
+        print(f"\n  Worker exited with code {returncode}.")
+        if stderr_text:
+            print(f"  Stderr: {stderr_text}")
+        sys.exit(returncode)
+
+    # safeguard_triggered is a successful early stop: fall through to the banner.
     print("============================================================")
     print(f"  Benchmark complete. Saved as Run ID: {run_id}")
     print("============================================================")
@@ -398,8 +459,6 @@ def cmd_benchmark_kokoro_ttfa(args):
 def cmd_benchmark_kokoro_batch(args):
     """Run Kokoro TTS batch performance sweep and log to database."""
     import json
-    import subprocess
-    import sys
 
     margin_val = _configured_margin(args.margin)
 
@@ -429,68 +488,70 @@ def cmd_benchmark_kokoro_batch(args):
     con = db.connect()
     run_id = db.start_kokoro_batch_run(con, args.model, args.voice, mlx_version)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
     print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
 
     table_header = "\n\n  Batch Size    | Total Time (s) | Throughput (CPS) | Peak Mem (GB)\n  --------------+----------------+------------------+--------------"
     header_printed = False
+    safeguard_triggered = False
+    error_triggered = False
+
+    def on_line(raw_line):
+        nonlocal header_printed, safeguard_triggered, error_triggered
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+        status = data.get("status")
+        if status == "warmup_done":
+            print(" OK", end="", flush=True)
+        elif status == "safeguard_triggered":
+            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+            safeguard_triggered = True
+        elif status == "rung_done":
+            if not header_printed:
+                print(table_header)
+                header_printed = True
+
+            batch_size = data["batch_size"]
+            total_time = data["total_time"]
+            cps = data["cps"]
+            peak_gb = data["peak_gb"]
+
+            print(f"  {batch_size:<13} | {total_time:<14.2f} | {cps:<16.1f} | {peak_gb:<12.2f}")
+
+            db.add_kokoro_batch_measurement(
+                con, run_id,
+                batch_size=batch_size,
+                total_time=total_time,
+                cps=cps,
+                peak_gb=peak_gb
+            )
+        elif status == "error":
+            print(f"\n  ERROR: {data.get('note')}")
+            error_triggered = True
+            return True  # signal _stream_worker to terminate the child immediately
+        return None
 
     try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            status = data.get("status")
-            if status == "warmup_done":
-                print(" OK", end="", flush=True)
-            elif status == "safeguard_triggered":
-                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
-                break
-            elif status == "rung_done":
-                if not header_printed:
-                    print(table_header)
-                    header_printed = True
-
-                batch_size = data["batch_size"]
-                total_time = data["total_time"]
-                cps = data["cps"]
-                peak_gb = data["peak_gb"]
-
-                print(f"  {batch_size:<13} | {total_time:<14.2f} | {cps:<16.1f} | {peak_gb:<12.2f}")
-
-                db.add_kokoro_batch_measurement(
-                    con, run_id,
-                    batch_size=batch_size,
-                    total_time=total_time,
-                    cps=cps,
-                    peak_gb=peak_gb
-                )
-            elif status == "error":
-                print(f"\n  ERROR: {data.get('note')}")
-                proc.terminate()
-                sys.exit(1)
+        returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
         print("\n  Benchmark interrupted by user.")
-        proc.terminate()
         sys.exit(1)
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read().strip()
-        print(f"\n  Worker exited with code {proc.returncode}.")
-        if err:
-            print(f"  Stderr: {err}")
-        sys.exit(proc.returncode)
+    if error_triggered:
+        sys.exit(1)
 
+    if returncode != 0:
+        print(f"\n  Worker exited with code {returncode}.")
+        if stderr_text:
+            print(f"  Stderr: {stderr_text}")
+        sys.exit(returncode)
+
+    # safeguard_triggered is a successful early stop: fall through to the banner.
     print("============================================================")
     print(f"  Benchmark complete. Saved as Run ID: {run_id}")
     print("============================================================")
@@ -499,8 +560,6 @@ def cmd_benchmark_kokoro_batch(args):
 def cmd_benchmark_kokoro_voice(args):
     """Run Kokoro TTS voice switching performance sweep and log to database."""
     import json
-    import subprocess
-    import sys
 
     margin_val = _configured_margin(args.margin)
 
@@ -530,68 +589,70 @@ def cmd_benchmark_kokoro_voice(args):
     con = db.connect()
     run_id = db.start_kokoro_voice_run(con, args.model, mlx_version)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
     print("  [warmup] Compiling model graphs and loading voices...", end="", flush=True)
 
     table_header = "\n\n  Condition Type   | Voice From | Voice To   | Latency (ms)\n  -----------------+------------+------------+-------------"
     header_printed = False
+    safeguard_triggered = False
+    error_triggered = False
+
+    def on_line(raw_line):
+        nonlocal header_printed, safeguard_triggered, error_triggered
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+        status = data.get("status")
+        if status == "warmup_done":
+            print(" OK", end="", flush=True)
+        elif status == "safeguard_triggered":
+            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+            safeguard_triggered = True
+        elif status == "rung_done":
+            if not header_printed:
+                print(table_header)
+                header_printed = True
+
+            cond_type = data["cond_type"]
+            voice_from = data["voice_from"]
+            voice_to = data["voice_to"]
+            duration_ms = data["duration_ms"]
+
+            print(f"  {cond_type:<16} | {voice_from:<10} | {voice_to:<10} | {duration_ms:<12.1f}")
+
+            db.add_kokoro_voice_measurement(
+                con, run_id,
+                cond_type=cond_type,
+                voice_from=voice_from,
+                voice_to=voice_to,
+                duration_ms=duration_ms
+            )
+        elif status == "error":
+            print(f"\n  ERROR: {data.get('note')}")
+            error_triggered = True
+            return True  # signal _stream_worker to terminate the child immediately
+        return None
 
     try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            status = data.get("status")
-            if status == "warmup_done":
-                print(" OK", end="", flush=True)
-            elif status == "safeguard_triggered":
-                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
-                break
-            elif status == "rung_done":
-                if not header_printed:
-                    print(table_header)
-                    header_printed = True
-
-                cond_type = data["cond_type"]
-                voice_from = data["voice_from"]
-                voice_to = data["voice_to"]
-                duration_ms = data["duration_ms"]
-
-                print(f"  {cond_type:<16} | {voice_from:<10} | {voice_to:<10} | {duration_ms:<12.1f}")
-
-                db.add_kokoro_voice_measurement(
-                    con, run_id,
-                    cond_type=cond_type,
-                    voice_from=voice_from,
-                    voice_to=voice_to,
-                    duration_ms=duration_ms
-                )
-            elif status == "error":
-                print(f"\n  ERROR: {data.get('note')}")
-                proc.terminate()
-                sys.exit(1)
+        returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
         print("\n  Benchmark interrupted by user.")
-        proc.terminate()
         sys.exit(1)
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read().strip()
-        print(f"\n  Worker exited with code {proc.returncode}.")
-        if err:
-            print(f"  Stderr: {err}")
-        sys.exit(proc.returncode)
+    if error_triggered:
+        sys.exit(1)
 
+    if returncode != 0:
+        print(f"\n  Worker exited with code {returncode}.")
+        if stderr_text:
+            print(f"  Stderr: {stderr_text}")
+        sys.exit(returncode)
+
+    # safeguard_triggered is a successful early stop: fall through to the banner.
     print("============================================================")
     print(f"  Benchmark complete. Saved as Run ID: {run_id}")
     print("============================================================")
@@ -600,8 +661,6 @@ def cmd_benchmark_kokoro_voice(args):
 def cmd_benchmark_kokoro_cache(args):
     """Run Kokoro TTS cache scaling performance sweep and log to database."""
     import json
-    import subprocess
-    import sys
 
     margin_val = _configured_margin(args.margin)
 
@@ -627,66 +686,68 @@ def cmd_benchmark_kokoro_cache(args):
     con = db.connect()
     run_id = db.start_kokoro_cache_run(con, args.model, mlx_version)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
     print("  [warmup] Compiling model graphs and loading voices...", end="", flush=True)
 
     table_header = "\n\n  Cache Size (Voices) | OS Wired (GB) | Peak Memory (GB)\n  --------------------+---------------+-----------------"
     header_printed = False
+    safeguard_triggered = False
+    error_triggered = False
+
+    def on_line(raw_line):
+        nonlocal header_printed, safeguard_triggered, error_triggered
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+        status = data.get("status")
+        if status == "warmup_done":
+            print(" OK", end="", flush=True)
+        elif status == "safeguard_triggered":
+            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
+            safeguard_triggered = True
+        elif status == "rung_done":
+            if not header_printed:
+                print(table_header)
+                header_printed = True
+
+            cache_size = data["cache_size"]
+            os_wired_gb = data["os_wired_gb"]
+            peak_gb = data["peak_gb"]
+
+            print(f"  {cache_size:<18} | {os_wired_gb:<13.3f} | {peak_gb:<15.3f}")
+
+            db.add_kokoro_cache_measurement(
+                con, run_id,
+                cache_size=cache_size,
+                os_wired_gb=os_wired_gb,
+                peak_gb=peak_gb
+            )
+        elif status == "error":
+            print(f"\n  ERROR: {data.get('note')}")
+            error_triggered = True
+            return True  # signal _stream_worker to terminate the child immediately
+        return None
 
     try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            status = data.get("status")
-            if status == "warmup_done":
-                print(" OK", end="", flush=True)
-            elif status == "safeguard_triggered":
-                print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
-                break
-            elif status == "rung_done":
-                if not header_printed:
-                    print(table_header)
-                    header_printed = True
-
-                cache_size = data["cache_size"]
-                os_wired_gb = data["os_wired_gb"]
-                peak_gb = data["peak_gb"]
-
-                print(f"  {cache_size:<18} | {os_wired_gb:<13.3f} | {peak_gb:<15.3f}")
-
-                db.add_kokoro_cache_measurement(
-                    con, run_id,
-                    cache_size=cache_size,
-                    os_wired_gb=os_wired_gb,
-                    peak_gb=peak_gb
-                )
-            elif status == "error":
-                print(f"\n  ERROR: {data.get('note')}")
-                proc.terminate()
-                sys.exit(1)
+        returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
         print("\n  Benchmark interrupted by user.")
-        proc.terminate()
         sys.exit(1)
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read().strip()
-        print(f"\n  Worker exited with code {proc.returncode}.")
-        if err:
-            print(f"  Stderr: {err}")
-        sys.exit(proc.returncode)
+    if error_triggered:
+        sys.exit(1)
 
+    if returncode != 0:
+        print(f"\n  Worker exited with code {returncode}.")
+        if stderr_text:
+            print(f"  Stderr: {stderr_text}")
+        sys.exit(returncode)
+
+    # safeguard_triggered is a successful early stop: fall through to the banner.
     print("============================================================")
     print(f"  Benchmark complete. Saved as Run ID: {run_id}")
     print("============================================================")
@@ -695,8 +756,6 @@ def cmd_benchmark_kokoro_cache(args):
 def cmd_benchmark_kokoro_baseline(args):
     """Run Kokoro TTS active baseline memory benchmark and log to database."""
     import json
-    import subprocess
-    import sys
 
     margin_val = _configured_margin(args.margin)
 
@@ -722,57 +781,59 @@ def cmd_benchmark_kokoro_baseline(args):
     con = db.connect()
     run_id = db.start_kokoro_baseline_run(con, args.model, mlx_version)
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
-
     print("  [profiling] Measuring settled OS baseline and active memory...", end="", flush=True)
 
+    error_triggered = False
+
+    def on_line(raw_line):
+        nonlocal error_triggered
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            return None
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+        status = data.get("status")
+        if status == "rung_done":
+            print(" OK", end="", flush=True)
+
+            baseline_gb = data["baseline_gb"]
+            active_gb = data["active_gb"]
+            overhead_gb = data["overhead_gb"]
+
+            print(f"\n\n  System Baseline RAM: {baseline_gb:.3f} GB")
+            print(f"  Active Synthesis RAM: {active_gb:.3f} GB")
+            print(f"  Static Active Overhead: {overhead_gb:.3f} GB")
+
+            db.add_kokoro_baseline_measurement(
+                con, run_id,
+                baseline_gb=baseline_gb,
+                active_gb=active_gb,
+                overhead_gb=overhead_gb
+            )
+        elif status == "error":
+            print(f"\n  ERROR: {data.get('note')}")
+            error_triggered = True
+            return True  # signal _stream_worker to terminate the child immediately
+        return None
+
     try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            status = data.get("status")
-            if status == "rung_done":
-                print(" OK", end="", flush=True)
-                
-                baseline_gb = data["baseline_gb"]
-                active_gb = data["active_gb"]
-                overhead_gb = data["overhead_gb"]
-
-                print(f"\n\n  System Baseline RAM: {baseline_gb:.3f} GB")
-                print(f"  Active Synthesis RAM: {active_gb:.3f} GB")
-                print(f"  Static Active Overhead: {overhead_gb:.3f} GB")
-
-                db.add_kokoro_baseline_measurement(
-                    con, run_id,
-                    baseline_gb=baseline_gb,
-                    active_gb=active_gb,
-                    overhead_gb=overhead_gb
-                )
-            elif status == "error":
-                print(f"\n  ERROR: {data.get('note')}")
-                proc.terminate()
-                sys.exit(1)
+        # capture_stderr=False: inherit terminal stderr, matching original behaviour.
+        returncode, stderr_text = _stream_worker(cmd, on_line, capture_stderr=False)
     except KeyboardInterrupt:
         print("\n  Benchmark interrupted by user.")
-        proc.terminate()
         sys.exit(1)
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read().strip() if proc.stderr else ""
-        print(f"\n  Worker exited with code {proc.returncode}.")
-        if err:
-            print(f"  Stderr: {err}")
-        sys.exit(proc.returncode)
+    if error_triggered:
+        sys.exit(1)
+
+    if returncode != 0:
+        print(f"\n  Worker exited with code {returncode}.")
+        if stderr_text:
+            print(f"  Stderr: {stderr_text}")
+        sys.exit(returncode)
 
     print("============================================================")
     print(f"  Benchmark complete. Saved as Run ID: {run_id}")

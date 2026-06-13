@@ -134,11 +134,15 @@ def describe(hf_id: str) -> ModelInfo | None:
         (sliding_enabled is not False and bool(t.get("sliding_window")))
         or lt.get("sliding_attention", 0) > 0
     )
+    # Separate two distinct failure modes:
+    #   1. _get_classes failing to import (mlx_lm API drift) → hard error, not is_causal=False.
+    #      Importing here (outside the narrow except) means an ImportError propagates up visibly.
+    #   2. _get_classes(t) raising ValueError/KeyError for an unsupported model_type → is_causal=False.
+    from mlx_lm.utils import _get_classes  # ImportError here is intentional: surfaces API drift loudly
     is_causal = True
     try:
-        from mlx_lm.utils import _get_classes
         _get_classes(t)
-    except Exception:
+    except (ValueError, KeyError):
         is_causal = False
 
     return ModelInfo(

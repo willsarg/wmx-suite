@@ -7,6 +7,16 @@ from wmx_suite.cli import cmd_scan, cmd_show, _run
 from wmx_suite.models import ModelInfo
 
 
+def test_get_classes_import_resolves():
+    """Regression: _get_classes must be importable from mlx_lm.utils.
+
+    If a future mlx_lm release renames or moves _get_classes, this test fails
+    loudly in CI rather than silently marking every model as non-causal.
+    """
+    from mlx_lm.utils import _get_classes  # noqa: F401
+    assert callable(_get_classes), "_get_classes must be callable"
+
+
 def test_is_causal_classification():
     # 1. Causal LLM config (should be causal)
     causal_config = {

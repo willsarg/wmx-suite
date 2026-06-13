@@ -188,3 +188,54 @@ def test_fit_is_not_stale_within_timestamp_precision_tolerance(monkeypatch):
     characterized = datetime.fromtimestamp(1000, timezone.utc).isoformat()
     monkeypatch.setattr(models, "cache_updated_at", lambda _hf_id: 1000.9)
     assert models.fit_is_stale("mlx-community/test", characterized) is False
+
+
+# ---------------------------------------------------------------------------
+# head_dim fallback arithmetic (safety-relevant: feeds fp16_kv_bytes_per_token)
+# ---------------------------------------------------------------------------
+
+
+def test_head_dim_derived_when_absent_from_config(monkeypatch):
+    """head_dim missing → hidden_size // num_attention_heads is used."""
+    info = _describe(
+        monkeypatch,
+        {
+            "num_hidden_layers": 4,
+            "num_key_value_heads": 8,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            # no "head_dim" key
+        },
+    )
+    assert info.head_dim == 128  # 2048 // 16
+
+
+def test_head_dim_explicit_takes_precedence_over_derivation(monkeypatch):
+    """Explicit head_dim in config wins over hidden_size // num_attention_heads."""
+    info = _describe(
+        monkeypatch,
+        {
+            "num_hidden_layers": 4,
+            "num_key_value_heads": 8,
+            "head_dim": 80,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+        },
+    )
+    # Should be 80 (explicit), NOT 128 (derived)
+    assert info.head_dim == 80
+
+
+def test_head_dim_is_none_when_neither_source_available(monkeypatch):
+    """Neither head_dim nor (hidden_size AND num_attention_heads) present → None."""
+    info = _describe(
+        monkeypatch,
+        {
+            "num_hidden_layers": 4,
+            "num_key_value_heads": 8,
+            # no head_dim, no hidden_size, no num_attention_heads
+        },
+    )
+    assert info.head_dim is None
+    # Confirm this flows through to fp16_kv_bytes_per_token returning 0 (no metadata)
+    assert info.fp16_kv_bytes_per_token() == 0.0

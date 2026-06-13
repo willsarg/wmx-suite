@@ -1,3 +1,5 @@
+import importlib
+import sys
 import pytest
 import json
 from wmx_suite import db
@@ -187,5 +189,28 @@ def test_kokoro_baseline_route(client):
     html = rv.data.decode()
     assert "Kokoro Baseline" in html
     assert "mlx-community/Kokoro-82M-bf16" in html
+
+
+def test_import_without_flask(monkeypatch):
+    """Importing wmx_suite.web.app must succeed even when Flask is unavailable,
+    and create_app() must raise ImportError with a clear message."""
+    # Block flask from being importable
+    monkeypatch.setitem(sys.modules, "flask", None)
+
+    # Remove any cached import of wmx_suite.web.app so it gets re-executed
+    mod_name = "wmx_suite.web.app"
+    original_mod = sys.modules.pop(mod_name, None)
+    try:
+        # This must not raise — the module-level code should be safe without Flask
+        mod = importlib.import_module(mod_name)
+
+        # create_app() must raise ImportError with a helpful message
+        with pytest.raises(ImportError, match="Flask is required"):
+            mod.create_app()
+    finally:
+        # Restore the original module (and remove the no-Flask version)
+        sys.modules.pop(mod_name, None)
+        if original_mod is not None:
+            sys.modules[mod_name] = original_mod
 
 

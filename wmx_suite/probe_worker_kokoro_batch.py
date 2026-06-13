@@ -128,8 +128,12 @@ def main() -> None:
         success = True
 
         def run_one_generation(text: str):
-            # Calls the thread-safe underlying generate function, bypassing the instance lock.
-            # Plain Python strings are passed to keep all MLX array allocations in-thread.
+            # Bypasses the KokoroTTS instance lock and calls the underlying generate()
+            # directly from multiple threads.  Thread-safety of concurrent generate() is
+            # an ASSUMPTION (the MLX Metal runtime and kokoro_mlx internals are not
+            # formally documented as thread-safe); no race has been observed in practice,
+            # but this is not verified.  Plain Python strings are passed to keep all MLX
+            # array allocations in-thread.
             return generate(
                 text=text,
                 model=tts._model,
@@ -146,6 +150,13 @@ def main() -> None:
 
             t0 = time.perf_counter()
             try:
+                # NOTE: the wired-memory safeguard above runs only BETWEEN rungs, not
+                # during a batch.  Concurrent synthesis transiently multiplies per-call
+                # allocations, so a brief spike above the between-rung check is possible
+                # before the next rung's check catches it.  This is acceptable here
+                # because Kokoro is a small (82 M-param), static-footprint model whose
+                # per-call transient allocation is low; it would be unsafe for larger
+                # models or dynamically-growing workloads.
                 with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
                     futures = [executor.submit(run_one_generation, text) for text in sentences_to_use]
                     # Wait for all thread jobs to finish
