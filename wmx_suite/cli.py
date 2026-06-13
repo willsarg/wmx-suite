@@ -115,7 +115,7 @@ def cmd_scan(_):
     n = 0
     for hf_id in found:
         info = models.describe(hf_id)
-        if info is None:
+        if info is None or not info.is_causal:
             continue
         db.upsert_model(con, info.as_dict())
         n += 1
@@ -128,6 +128,8 @@ def cmd_show(args):
     info = models.describe(args.hf_id)
     if info is None:
         raise SystemExit(f"not found in cache: {args.hf_id}")
+    if not info.is_causal:
+        print(f"WARNING: Model {args.hf_id} is in HF cache but is not a supported causal language model.")
     for k, v in info.as_dict().items():
         print(f"  {k:18}: {v}")
     bpt = info.fp16_kv_bytes_per_token()
@@ -309,6 +311,29 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
     p = launcher.plan(model_id, margin_gb=margin_gb)
     if p.get("error"):
         raise SystemExit(f"[run] {p['error']}")
+
+    if p["source"] == "estimated" and not force:
+        if sys.stdin.isatty():
+            print(f"[run] Model {model_id} has not been characterized yet.", file=sys.stderr)
+            try:
+                ans = input("[run] Characterize it now to find its safe context ceiling? [y/N]: ").strip().lower()
+            except KeyboardInterrupt:
+                print(file=sys.stderr)
+                raise SystemExit("[run] Aborted.")
+            if ans in ("y", "yes"):
+                print(f"[run] Running characterization for {model_id}...", file=sys.stderr)
+                try:
+                    probe.characterize(model_id, margin_gb=margin_gb, allow_min_probe=True)
+                    # Re-plan with the newly saved fit
+                    p = launcher.plan(model_id, margin_gb=margin_gb)
+                    if p.get("error"):
+                        raise SystemExit(f"[run] Re-planning failed: {p['error']}")
+                except Exception as e:
+                    raise SystemExit(f"[run] Characterization failed: {e}")
+            else:
+                raise SystemExit("[run] Aborted. Run characterize first or pass --force to run with estimated limits.")
+        else:
+            raise SystemExit("[run] REFUSED: Model is uncharacterized and shell is non-interactive. Run characterize first or pass --force.")
 
     kv = "fp16 (RotatingKVCache — not quantizable)" if p["kv_bits"] is None else f"{p['kv_bits']}-bit"
     print(f"[run] {model_id}", file=sys.stderr)

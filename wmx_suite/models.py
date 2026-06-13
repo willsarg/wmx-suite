@@ -39,6 +39,7 @@ class ModelInfo:
     can_quantize_kv: bool        # False => must run fp16 KV (do NOT pass --kv-bits 4)
     layer_types: dict
     max_kv_size_enforced: bool = True
+    is_causal: bool = True
 
     def fp16_kv_bytes_per_token(self) -> float:
         """Analytic fp16 KV-cache growth per token (K and V), counting only growing layers.
@@ -133,6 +134,13 @@ def describe(hf_id: str) -> ModelInfo | None:
         (sliding_enabled is not False and bool(t.get("sliding_window")))
         or lt.get("sliding_attention", 0) > 0
     )
+    is_causal = True
+    try:
+        from mlx_lm.utils import _get_classes
+        _get_classes(t)
+    except Exception:
+        is_causal = False
+
     return ModelInfo(
         hf_id=hf_id,
         weights_gb=round(weights_gb(hf_id), 2),
@@ -149,6 +157,7 @@ def describe(hf_id: str) -> ModelInfo | None:
             raw.get("model_type") not in UNBOUNDED_CUSTOM_CACHE_TYPES
             and t.get("model_type") not in UNBOUNDED_CUSTOM_CACHE_TYPES
         ),
+        is_causal=is_causal,
     )
 
 
