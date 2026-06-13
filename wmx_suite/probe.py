@@ -26,6 +26,7 @@ from . import config, db, models, profiles
 from .system import SystemLimits, read_limits, sample_settled_baseline
 
 DEFAULT_RAMP = [2048, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
+CALIBRATE_RAMP = [512, 2048]  # two small safe rungs; the c->0 intercept gives the base
 MIN_PROBE_CTX = 512  # supervised calibration probe — deep in the safe zone
 DEFAULT_REPEATS = 3  # N-repeat median per rung, to smooth prefill-transient sampling jitter
 # rough base-footprint estimate (GB): weights resident + fixed overhead, on top of the
@@ -255,3 +256,93 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     else:
         log("# not enough points to fit (need >=2 safe rungs)")
     return result
+
+
+def _pick_calibration_model() -> str:
+    """Smallest causal mlx-community model in the HF cache (by on-disk weight size)."""
+    candidates: list[tuple[float, str]] = []
+    for hf_id in models.scan_cache():
+        info = models.describe(hf_id)
+        if info is None or not info.is_causal:
+            continue
+        candidates.append((info.weights_gb, hf_id))
+    if not candidates:
+        raise SystemExit(
+            "[calibrate] no causal mlx-community model found in the HF cache. "
+            "Download a small one (e.g. a 0.5-1.5B mlx-community model) or pass --model."
+        )
+    candidates.sort()
+    return candidates[0][1]
+
+
+def calibrate(model: str | None = None, *, margin_gb: float | None = None,
+              repeats: int = DEFAULT_REPEATS, worker_python: str | None = None,
+              verbose: bool = True) -> dict:
+    """Measure this machine's cold-start FIXED_OVERHEAD_GB and store a per-machine profile.
+
+    Fits the model's base delta-over-baseline at context->0 from two small safe rungs and
+    derives overhead = intercept - DEFAULT_RESIDENT_FACTOR * weights, floored at the default
+    so calibration only ever tightens (never loosens) the pre-flight estimate.
+    """
+    margin_gb = config.margin_gb(margin_gb)
+    hf_id = model or _pick_calibration_model()
+    info = models.describe(hf_id)
+    if info is None:
+        raise SystemExit(f"[calibrate] model not found in HF cache: {hf_id}")
+    if not info.is_causal:
+        raise SystemExit(f"[calibrate] {hf_id} is not a supported causal language model.")
+
+    limits = read_limits()
+    threshold = limits.safe_threshold_gb(margin_gb)
+    kv_bits = 4 if info.can_quantize_kv else None
+    py = worker_python or sys.executable
+
+    def log(*a):
+        if verbose:
+            print(*a, flush=True)
+
+    import mlx.core as mx
+    con = db.connect()
+
+    est = estimate_base_gb(info, limits, con)
+    if est >= threshold:
+        raise SystemExit(
+            f"[calibrate] estimated base {est:.2f}GB >= threshold {threshold:.2f}GB — "
+            f"machine too loaded or model too large to calibrate safely. Free memory or "
+            f"pass a smaller --model."
+        )
+
+    log(f"# calibrate {hf_id}  weights={info.weights_gb}GB  "
+        f"threshold={threshold:.2f}GB  kv_bits={kv_bits}")
+
+    xs_k: list[float] = []
+    ys: list[float] = []
+    for ctx in CALIBRATE_RAMP:
+        if ctx > (info.max_context or ctx):
+            continue
+        m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
+        if m is None or m.get("status") != "ok":
+            note = (m or {}).get("note", "no output")
+            raise SystemExit(f"[calibrate] rung {ctx} failed: {note}")
+        xs_k.append(ctx / 1000)
+        ys.append(m["delta"])
+        log(f"{ctx:>6}  delta={m['delta']:.3f}GB  (median of {m['repeats']})")
+
+    if len(xs_k) < 2:
+        raise SystemExit("[calibrate] need >=2 successful rungs to fit the base intercept.")
+
+    intercept, _slope, _r2 = _linfit(xs_k, ys)
+    measured_overhead = round(intercept - profiles.DEFAULT_RESIDENT_FACTOR * info.weights_gb, 3)
+    fixed_overhead = max(profiles.DEFAULT_FIXED_OVERHEAD_GB, measured_overhead)
+
+    key = profiles.machine_key()
+    db.upsert_profile(con, key, resident_factor=profiles.DEFAULT_RESIDENT_FACTOR,
+                      fixed_overhead_gb=fixed_overhead, model_id=hf_id,
+                      n_points=len(xs_k), mlx_version=mx.__version__)
+    log(f"# intercept(base@c->0)={intercept:.3f}GB  measured_overhead={measured_overhead:.3f}GB  "
+        f"stored={fixed_overhead:.3f}GB (floor {profiles.DEFAULT_FIXED_OVERHEAD_GB})")
+    return {
+        "hf_id": hf_id, "machine_key": key, "intercept_gb": round(intercept, 3),
+        "measured_overhead_gb": measured_overhead, "fixed_overhead_gb": fixed_overhead,
+        "default_overhead_gb": profiles.DEFAULT_FIXED_OVERHEAD_GB, "n_points": len(xs_k),
+    }

@@ -4,7 +4,12 @@ from wmx_suite import db, models, probe
 from wmx_suite.system import SystemLimits
 
 
-def _model_info(weights_gb: float = 8.0) -> models.ModelInfo:
+def _model_info(
+    weights_gb: float = 8.0,
+    is_causal: bool = True,
+    can_quantize_kv: bool = True,
+    max_context: int = 32768,
+) -> models.ModelInfo:
     return models.ModelInfo(
         hf_id="mlx-community/test",
         weights_gb=weights_gb,
@@ -13,18 +18,19 @@ def _model_info(weights_gb: float = 8.0) -> models.ModelInfo:
         kv_heads=8,
         head_dim=128,
         hidden_size=1024,
-        max_context=32768,
+        max_context=max_context,
         cache_type="standard",
-        can_quantize_kv=True,
+        can_quantize_kv=can_quantize_kv,
+        is_causal=is_causal,
         layer_types={"full_attention": 2, "linear_attention": 2},
     )
 
 
-def _limits(wired_now_gb: float) -> SystemLimits:
+def _limits(wired_now_gb: float = 3.0, wall_gb: float = 17.18) -> SystemLimits:
     return SystemLimits(
         device="test",
         total_gb=24.0,
-        wall_gb=17.18,
+        wall_gb=wall_gb,
         max_buffer_gb=8.0,
         swap_free_gb=1.0,
         wired_now_gb=wired_now_gb,
@@ -93,3 +99,65 @@ def test_estimate_base_gb_uses_profile_overhead(monkeypatch, tmp_path):
                       model_id="m", n_points=2, mlx_version="9.9")
     base_profile = probe.estimate_base_gb(info, limits, con)
     assert round(base_profile - base_default, 3) == 1.5   # overhead 2.5 - 1.0
+
+
+def test_pick_calibration_model_smallest_causal(monkeypatch):
+    from wmx_suite import models, probe
+    monkeypatch.setattr(models, "scan_cache", lambda: ["org/big", "org/small", "org/notcausal"])
+
+    def fake_describe(hf_id):
+        table = {
+            "org/big": _model_info(weights_gb=8.0, is_causal=True),
+            "org/small": _model_info(weights_gb=0.5, is_causal=True),
+            "org/notcausal": _model_info(weights_gb=0.1, is_causal=False),
+        }
+        return table[hf_id]
+    monkeypatch.setattr(models, "describe", fake_describe)
+    assert probe._pick_calibration_model() == "org/small"
+
+
+def test_pick_calibration_model_errors_when_none(monkeypatch):
+    import pytest
+    from wmx_suite import models, probe
+    monkeypatch.setattr(models, "scan_cache", lambda: [])
+    with pytest.raises(SystemExit, match="no causal"):
+        probe._pick_calibration_model()
+
+
+def test_calibrate_solves_and_floors_overhead(monkeypatch, tmp_path):
+    from wmx_suite import db, models, probe, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    key = ("Apple M4 Pro", 1, 15)
+    monkeypatch.setattr(profiles, "machine_key", lambda: key)
+    info = _model_info(weights_gb=0.5, is_causal=True, can_quantize_kv=True, max_context=32768)
+    monkeypatch.setattr(models, "describe", lambda hf_id: info)
+    monkeypatch.setattr(probe, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+
+    deltas = {512: 2.05, 2048: 2.20}  # intercept ~2.0 at c->0
+    def fake_measure(py, hf_id, ctx, kv_bits, repeats, *, verbose, log):
+        return {"status": "ok", "context": ctx, "repeats": 3, "delta": deltas[ctx],
+                "os_wired_gb": 5.0, "mlx_peak_gb": 4.0, "spread_gb": 0.1}
+    monkeypatch.setattr(probe, "_measure_rung", fake_measure)
+
+    result = probe.calibrate("org/tiny", verbose=False)
+    assert abs(result["intercept_gb"] - 2.0) < 0.05
+    assert abs(result["measured_overhead_gb"] - 1.475) < 0.05   # 2.0 - 1.05*0.5
+    assert result["fixed_overhead_gb"] >= profiles.DEFAULT_FIXED_OVERHEAD_GB
+    stored = db.get_profile(db.connect(), key)
+    assert stored["fixed_overhead_gb"] == result["fixed_overhead_gb"]
+
+
+def test_calibrate_floor_applies_when_residual_low(monkeypatch, tmp_path):
+    from wmx_suite import db, models, probe, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 1, 15))
+    info = _model_info(weights_gb=0.5, is_causal=True, can_quantize_kv=True, max_context=32768)
+    monkeypatch.setattr(models, "describe", lambda hf_id: info)
+    monkeypatch.setattr(probe, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
+    deltas = {512: 0.30, 2048: 0.30}  # residual goes negative -> floor applies
+    monkeypatch.setattr(probe, "_measure_rung",
+                        lambda py, hf, ctx, kv, r, *, verbose, log:
+                        {"status": "ok", "repeats": 3, "delta": deltas[ctx], "mlx_peak_gb": 1.0,
+                         "os_wired_gb": 3.3, "spread_gb": 0.0})
+    result = probe.calibrate("org/tiny", verbose=False)
+    assert result["fixed_overhead_gb"] == profiles.DEFAULT_FIXED_OVERHEAD_GB
