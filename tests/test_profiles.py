@@ -16,11 +16,13 @@ def test_cold_start_constants_uses_stored_profile(monkeypatch, tmp_path):
     key = ("Apple M4 Pro", 1, 15)
     monkeypatch.setattr(profiles, "machine_key", lambda: key)
     con = db.connect()
-    db.upsert_profile(con, key, resident_factor=1.05, fixed_overhead_gb=1.6,
+    # Store a deliberately non-default resident_factor to prove it is IGNORED
+    # (the factor is held fixed; only the overhead is profile-specific).
+    db.upsert_profile(con, key, resident_factor=9.9, fixed_overhead_gb=1.6,
                       model_id="m", n_points=2, mlx_version="9.9")
     factor, overhead, source = profiles.cold_start_constants(con)
-    assert factor == 1.05
-    assert overhead == 1.6
+    assert factor == profiles.DEFAULT_RESIDENT_FACTOR   # held fixed, not 9.9
+    assert overhead == 1.6                              # overhead from the profile
     assert source == "profile"
 
 

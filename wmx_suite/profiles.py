@@ -8,6 +8,8 @@ is trustworthy on any Apple Silicon SKU. `characterize` remains the per-model me
 """
 from __future__ import annotations
 
+import sqlite3
+
 from . import db, system
 
 # Loose priors, measured loosely on the M4 Pro (see probe.py). The resident factor is
@@ -28,7 +30,7 @@ def machine_key() -> tuple[str, int, int]:
     return (str(d.get("device_name", "")), int(d.get("memory_size", 0)), system.macos_major())
 
 
-def cold_start_constants(con) -> tuple[float, float, str]:
+def cold_start_constants(con: sqlite3.Connection) -> tuple[float, float, str]:
     """Return (resident_factor, fixed_overhead_gb, source).
 
     source == "profile" when a stored profile matches this machine, else "default".
@@ -36,5 +38,5 @@ def cold_start_constants(con) -> tuple[float, float, str]:
     """
     profile = db.get_profile(con, machine_key())
     if profile is not None:
-        return float(profile["resident_factor"]), float(profile["fixed_overhead_gb"]), "profile"
+        return DEFAULT_RESIDENT_FACTOR, float(profile["fixed_overhead_gb"]), "profile"
     return DEFAULT_RESIDENT_FACTOR, DEFAULT_FIXED_OVERHEAD_GB, "default"
