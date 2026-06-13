@@ -141,12 +141,7 @@ def cmd_characterize(args):
 
 def cmd_list(_):
     con = db.connect()
-    rows = con.execute(
-        "SELECT m.hf_id, m.cache_type, f.model_base_gb, f.slope_gb_per_k, f.ref_baseline_gb, "
-        "f.safe_ceiling_ctx, f.hard_wall_ctx, f.r2 "
-        "FROM fits f JOIN probe_runs r ON f.run_id=r.id JOIN models m ON r.hf_id=m.hf_id "
-        "GROUP BY m.hf_id HAVING f.id=MAX(f.id) ORDER BY m.hf_id"
-    ).fetchall()
+    rows = db.latest_fits(con)
     if not rows:
         print("no characterized models yet — run `characterize <hf_id>`")
         return
@@ -158,6 +153,8 @@ def cmd_list(_):
         s = speeds.get(r["hf_id"])
         if s:
             line += f"  gen≈{median(s):.1f} tok/s (n={len(s)})"
+        if models.fit_is_stale(r["hf_id"], r["characterized_at"]):
+            line += "  WARNING: fit may be stale — consider re-running characterize"
         print(line)
 
 
@@ -291,6 +288,9 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
     kv = "fp16 (RotatingKVCache — not quantizable)" if p["kv_bits"] is None else f"{p['kv_bits']}-bit"
     print(f"[run] {model_id}", file=sys.stderr)
     print(f"[run] source={p['source']}  cache={p['cache_type']}  kv={kv}", file=sys.stderr)
+    if p.get("fit_stale"):
+        print("[run] WARNING: fit may be stale — consider re-running characterize",
+              file=sys.stderr)
     print(f"[run] live_base {p['live_base_gb']}GB + model {p['model_base_gb']}GB = "
           f"{p['base_abs_gb']}GB  |  slope {p['slope_gb_per_k']}GB/1k  |  "
           f"wall {p['wall_gb']}GB  threshold {p['threshold_gb']}GB", file=sys.stderr)

@@ -74,7 +74,7 @@ use them only when you understand the hard-lock risk.
 | `uv run wmx-suite scan` | Register `mlx-community` models from the HF cache |
 | `uv run wmx-suite show <hf_id>` | Architecture + memory class for one model |
 | `uv run wmx-suite characterize <hf_id>` | Safe probe → fitted context ceiling |
-| `uv run wmx-suite list` | Ceilings for everything characterized |
+| `uv run wmx-suite list` | Ceilings for everything characterized; warns about stale fits |
 | `uv run wmx-suite run --model <hf_id> …` | Safely launch `mlx_lm.generate` |
 
 `characterize` refuses to launch any probe whose pre-flight base estimate already
@@ -106,6 +106,12 @@ uv run wmx-suite run --dry-run --model <hf_id> --prompt "..."
 Every successful run records its prompt/generation **tokens-per-second** to the database
 (output still streams live — it runs under a PTY so the experience is unchanged). `list`
 then shows the median gen speed per model. Pass `--no-log` for a bare passthrough.
+
+If artifacts in a model's cached Hugging Face snapshots are newer than its latest
+characterization, `list` and `run` warn that the fit may be stale. Unused blobs,
+mutable refs, and negative-lookup metadata are ignored. The suite does not
+automatically re-characterize; review the cache change and run `characterize` again
+before relying on the old ceiling.
 
 ---
 

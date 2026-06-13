@@ -20,6 +20,7 @@ def _plan():
         "threshold_gb": 15.0,
         "wall_gb": 17.0,
         "max_kv_size": 4096,
+        "fit_stale": False,
         "refuse": False,
     }
 
@@ -237,3 +238,48 @@ def test_characterize_uses_environment_margin(monkeypatch):
     )
 
     assert seen["margin_gb"] == 3.0
+
+
+def test_run_warns_when_fit_is_stale(monkeypatch, capsys):
+    plan = {**_plan(), "fit_stale": True}
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: plan)
+    monkeypatch.setattr(
+        cli.launcher,
+        "build_argv",
+        lambda rest, plan, *, force: rest,
+    )
+
+    cli._run(
+        ["--model", "mlx-community/test"],
+        margin=2.0,
+        force=False,
+        dry_run=True,
+    )
+
+    assert "fit may be stale" in capsys.readouterr().err
+
+
+def test_list_warns_when_fit_is_stale(monkeypatch, capsys):
+    rows = [
+        {
+            "hf_id": "mlx-community/test",
+            "cache_type": "standard",
+            "model_base_gb": 8.0,
+            "slope_gb_per_k": 0.1,
+            "ref_baseline_gb": 3.0,
+            "safe_ceiling_ctx": 40000,
+            "hard_wall_ctx": 60000,
+            "r2": 1.0,
+            "characterized_at": "2026-06-13T00:00:00+00:00",
+        }
+    ]
+
+    connection = object()
+    monkeypatch.setattr(cli.db, "connect", lambda: connection)
+    monkeypatch.setattr(cli.db, "latest_fits", lambda _con: rows)
+    monkeypatch.setattr(cli.db, "gen_speeds", lambda _con: {})
+    monkeypatch.setattr(cli.models, "fit_is_stale", lambda _hf_id, _created: True)
+
+    cli.cmd_list(None)
+
+    assert "fit may be stale" in capsys.readouterr().out

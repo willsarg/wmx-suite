@@ -159,11 +159,27 @@ def gen_speeds(con: sqlite3.Connection) -> dict[str, list[float]]:
 def latest_fit(con: sqlite3.Connection, hf_id: str) -> dict | None:
     """Most recent fitted curve for a model, or None if never characterized."""
     row = con.execute(
-        "SELECT f.* FROM fits f JOIN probe_runs r ON f.run_id = r.id "
+        "SELECT f.*, r.created_at AS characterized_at "
+        "FROM fits f JOIN probe_runs r ON f.run_id = r.id "
         "WHERE r.hf_id = ? ORDER BY f.id DESC LIMIT 1",
         (hf_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def latest_fits(con: sqlite3.Connection) -> list[dict]:
+    """Most recent fitted curve for every characterized model."""
+    rows = con.execute(
+        "WITH ranked AS ("
+        "  SELECT m.hf_id, m.cache_type, f.model_base_gb, f.slope_gb_per_k, "
+        "         f.ref_baseline_gb, f.safe_ceiling_ctx, f.hard_wall_ctx, f.r2, "
+        "         r.created_at AS characterized_at, "
+        "         ROW_NUMBER() OVER (PARTITION BY m.hf_id ORDER BY f.id DESC) AS rn "
+        "  FROM fits f JOIN probe_runs r ON f.run_id=r.id "
+        "  JOIN models m ON r.hf_id=m.hf_id"
+        ") SELECT * FROM ranked WHERE rn=1 ORDER BY hf_id"
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def save_fit(con: sqlite3.Connection, run_id: int, fit: dict) -> None:

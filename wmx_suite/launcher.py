@@ -80,15 +80,18 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
         model_base = float(fit["model_base_gb"])
         slope = float(fit["slope_gb_per_k"])
         source = "measured"
+        fit_stale = models.fit_is_stale(hf_id, fit.get("characterized_at"))
     else:
         model_base = info.weights_gb * RESIDENT_FACTOR + FIXED_OVERHEAD_GB
         slope = _estimated_slope_gb_per_k(info)
         source = "estimated"
+        fit_stale = False
 
     pred = predict(model_base_gb=model_base, slope_gb_per_k=slope, live_base_gb=live_base,
                    threshold_gb=threshold, wall_gb=wall, model_max=info.max_context)
     p = {
         "hf_id": hf_id, "kv_bits": kv_bits, "source": source,
+        "fit_stale": fit_stale,
         "kv_group_size": KV_GROUP_SIZE, "quantized_kv_start": QUANTIZED_KV_START,
         "cache_type": info.cache_type, "model_max": info.max_context,
         "live_base_gb": round(live_base, 2), "model_base_gb": round(model_base, 2),

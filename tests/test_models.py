@@ -1,4 +1,6 @@
 import json
+import os
+from datetime import datetime, timezone
 
 import pytest
 
@@ -104,3 +106,71 @@ def test_fp16_kv_bytes_per_token_requires_metadata(kv_heads, head_dim):
         layer_types={},
     )
     assert info.fp16_kv_bytes_per_token() == 0.0
+
+
+def test_cache_updated_at_uses_newest_nested_artifact(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    cache = hub / "models--mlx-community--test"
+    older = cache / "blobs" / "old"
+    newer = cache / "snapshots" / "abc" / "config.json"
+    older.parent.mkdir(parents=True)
+    newer.parent.mkdir(parents=True)
+    older.write_text("old", encoding="utf-8")
+    newer.write_text("new", encoding="utf-8")
+    os.utime(older, (1000, 1000))
+    os.utime(newer, (2000, 2000))
+    monkeypatch.setattr(models, "HUB", str(hub))
+
+    assert models.cache_updated_at("mlx-community/test") == 2000
+
+
+def test_cache_updated_at_returns_none_when_model_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(models, "HUB", str(tmp_path))
+    assert models.cache_updated_at("mlx-community/missing") is None
+
+
+def test_cache_updated_at_ignores_refs_and_negative_cache(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    cache = hub / "models--mlx-community--test"
+    snapshot = cache / "snapshots" / "commit" / "weight"
+    unused_blob = cache / "blobs" / "unused"
+    ref = cache / "refs" / "main"
+    missing = cache / ".no_exist" / "commit" / "tokenizer.model"
+    for path in (snapshot, unused_blob, ref, missing):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("data", encoding="utf-8")
+    os.utime(snapshot, (1000, 1000))
+    os.utime(unused_blob, (5000, 5000))
+    os.utime(ref, (3000, 3000))
+    os.utime(missing, (4000, 4000))
+    monkeypatch.setattr(models, "HUB", str(hub))
+
+    assert models.cache_updated_at("mlx-community/test") == 1000
+
+
+def test_cache_updated_at_counts_new_snapshot_symlink(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    cache = hub / "models--mlx-community--test"
+    blob = cache / "blobs" / "weight"
+    snapshot = cache / "snapshots" / "new" / "weight"
+    blob.parent.mkdir(parents=True)
+    snapshot.parent.mkdir(parents=True)
+    blob.write_text("weight", encoding="utf-8")
+    os.utime(blob, (1000, 1000))
+    snapshot.symlink_to(blob)
+    os.utime(snapshot, (2000, 2000), follow_symlinks=False)
+    monkeypatch.setattr(models, "HUB", str(hub))
+
+    assert models.cache_updated_at("mlx-community/test") == 2000
+
+
+def test_fit_is_stale_when_cache_is_more_than_one_second_newer(monkeypatch):
+    characterized = datetime.fromtimestamp(1000, timezone.utc).isoformat()
+    monkeypatch.setattr(models, "cache_updated_at", lambda _hf_id: 1001.1)
+    assert models.fit_is_stale("mlx-community/test", characterized) is True
+
+
+def test_fit_is_not_stale_within_timestamp_precision_tolerance(monkeypatch):
+    characterized = datetime.fromtimestamp(1000, timezone.utc).isoformat()
+    monkeypatch.setattr(models, "cache_updated_at", lambda _hf_id: 1000.9)
+    assert models.fit_is_stale("mlx-community/test", characterized) is False

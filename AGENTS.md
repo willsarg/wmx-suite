@@ -133,6 +133,11 @@ cli.py run    # parses passthrough args, prints the plan, execs mlx_lm.generate 
 `run` is intercepted in `cli.main()` before argparse so it can forward arbitrary flags to
 `mlx_lm.generate` (argparse.REMAINDER mishandles leading optionals).
 
+`list` and `run` compare the newest artifact mtime in the model's cached HF snapshots
+against the latest characterization run. Unused blobs, mutable `refs/`, and `.no_exist/`
+metadata are ignored. A newer cache produces a warning only; it never auto-runs
+`characterize`.
+
 ## Known open work
 
 - Calibrate the pre-flight base estimate in `probe.py` (`RESIDENT_FACTOR`,

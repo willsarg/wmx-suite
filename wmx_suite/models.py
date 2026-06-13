@@ -19,6 +19,7 @@ import json
 import os
 from collections import Counter
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 
 HUB = os.path.expanduser("~/.cache/huggingface/hub")
 
@@ -52,6 +53,40 @@ class ModelInfo:
 
 def _cache_dir(hf_id: str) -> str:
     return os.path.join(HUB, "models--" + hf_id.replace("/", "--"))
+
+
+def cache_updated_at(hf_id: str) -> float | None:
+    """Newest artifact mtime in any locally cached model snapshot."""
+    root = _cache_dir(hf_id)
+    if not os.path.isdir(root):
+        return None
+    latest: float | None = None
+    for dirpath, _, filenames in os.walk(os.path.join(root, "snapshots")):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            try:
+                mtime = max(os.lstat(path).st_mtime, os.path.getmtime(path))
+            except OSError:
+                continue
+            latest = mtime if latest is None else max(latest, mtime)
+    return latest
+
+
+def fit_is_stale(hf_id: str, characterized_at: str | None) -> bool:
+    """Whether cache artifacts are newer than a characterization run."""
+    if not characterized_at:
+        return False
+    try:
+        characterized = datetime.fromisoformat(characterized_at)
+    except ValueError:
+        return False
+    if characterized.tzinfo is None:
+        characterized = characterized.replace(tzinfo=timezone.utc)
+    cache_mtime = cache_updated_at(hf_id)
+    if cache_mtime is None:
+        return False
+    # DB timestamps use second precision; avoid false positives within that second.
+    return cache_mtime > characterized.timestamp() + 1.0
 
 
 def weights_gb(hf_id: str) -> float:

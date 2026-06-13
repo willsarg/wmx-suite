@@ -34,6 +34,7 @@ def _install_plan_fakes(monkeypatch, *, info, fit, live_base=3.0):
     monkeypatch.setattr(launcher, "sample_settled_baseline", lambda: live_base)
     monkeypatch.setattr(launcher.db, "connect", lambda: object())
     monkeypatch.setattr(launcher.db, "latest_fit", lambda _con, _hf_id: fit)
+    monkeypatch.setattr(launcher.models, "fit_is_stale", lambda _hf_id, _created: False)
 
 
 def _plan_dict(*, kv_bits=4, max_kv_size=4096):
@@ -153,6 +154,23 @@ def test_plan_prefers_measured_fit(monkeypatch):
     assert result["source"] == "measured"
     assert result["max_kv_size"] == 40000
     assert result["kv_bits"] == 4
+
+
+def test_plan_marks_measured_fit_stale(monkeypatch):
+    fit = {
+        "model_base_gb": 8.0,
+        "slope_gb_per_k": 0.1,
+        "characterized_at": "2026-06-13T00:00:00+00:00",
+    }
+    _install_plan_fakes(monkeypatch, info=_model_info(), fit=fit)
+    monkeypatch.setattr(launcher.models, "fit_is_stale", lambda _hf_id, _created: True)
+
+    assert launcher.plan("mlx-community/test")["fit_stale"] is True
+
+
+def test_plan_estimate_is_not_labeled_stale(monkeypatch):
+    _install_plan_fakes(monkeypatch, info=_model_info(), fit=None)
+    assert launcher.plan("mlx-community/test")["fit_stale"] is False
 
 
 def test_plan_refuses_wall_equality(monkeypatch):
