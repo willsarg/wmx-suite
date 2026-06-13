@@ -15,10 +15,7 @@ from dataclasses import dataclass
 from . import config, db, models, profiles
 from .system import read_limits, sample_settled_baseline
 
-# Measured: the OS-wired slope is dominated by the prefill transient, ~5x the analytic
-# fp16 KV-cache slope (Gemma: analytic 0.0143 vs measured 0.070 GB/1k). For UNCHARACTERIZED
-# models we apply this multiplier so the estimated cap stays conservative.
-PREFILL_SPIKE_MULT = 5.0
+PREFILL_SPIKE_MULT = models.PREFILL_SPIKE_MULT  # source of truth: models.py
 MIN_USEFUL_CTX = 512
 KV_BITS = 4
 KV_GROUP_SIZE = 64
@@ -28,8 +25,7 @@ PROMPT_WARNING_FRACTION = 0.8
 
 def _estimated_slope_gb_per_k(info: models.ModelInfo) -> float:
     """Conservative os-wired slope estimate for an uncharacterized model (GB per 1k tokens)."""
-    kv_slope = info.fp16_kv_bytes_per_token() * 1000 / 1e9  # fp16 steady-state KV
-    return kv_slope * PREFILL_SPIKE_MULT
+    return info.estimated_slope_gb_per_k()
 
 
 @dataclass(frozen=True)

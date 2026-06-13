@@ -24,6 +24,11 @@ from datetime import datetime, timezone
 HUB = os.path.expanduser("~/.cache/huggingface/hub")
 UNBOUNDED_CUSTOM_CACHE_TYPES = {"qwen3_5", "qwen3_5_text"}
 
+# Measured: the OS-wired slope is dominated by the prefill transient, ~5x the analytic
+# fp16 KV-cache slope (Gemma: analytic 0.0143 vs measured 0.070 GB/1k). For UNCHARACTERIZED
+# models we apply this multiplier so estimates stay conservative.
+PREFILL_SPIKE_MULT = 5.0
+
 
 @dataclass
 class ModelInfo:
@@ -47,6 +52,12 @@ class ModelInfo:
         if not (self.kv_heads and self.head_dim):
             return 0.0
         return self.growing_layers * self.kv_heads * self.head_dim * 2 * 2  # 2=(K,V), 2 bytes fp16
+
+    def estimated_slope_gb_per_k(self) -> float:
+        """Conservative os-wired slope estimate (GB per 1k tokens) for an UNcharacterized
+        model: fp16 steady-state KV growth scaled by the prefill-spike multiplier."""
+        kv_slope = self.fp16_kv_bytes_per_token() * 1000 / 1e9
+        return kv_slope * PREFILL_SPIKE_MULT
 
     def as_dict(self) -> dict:
         d = asdict(self)

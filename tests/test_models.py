@@ -239,3 +239,23 @@ def test_head_dim_is_none_when_neither_source_available(monkeypatch):
     assert info.head_dim is None
     # Confirm this flows through to fp16_kv_bytes_per_token returning 0 (no metadata)
     assert info.fp16_kv_bytes_per_token() == 0.0
+
+
+def test_estimated_slope_matches_fp16_times_prefill_mult():
+    info = models.ModelInfo(
+        hf_id="x", weights_gb=1.0, n_layers=4, growing_layers=2, kv_heads=8,
+        head_dim=128, hidden_size=1024, max_context=32768, cache_type="standard",
+        can_quantize_kv=True, layer_types={},
+    )
+    expected = info.fp16_kv_bytes_per_token() * 1000 / 1e9 * models.PREFILL_SPIKE_MULT
+    assert info.estimated_slope_gb_per_k() == pytest.approx(expected)
+    assert expected > 0  # this model has KV metadata, so slope is non-zero
+
+
+def test_estimated_slope_zero_without_kv_metadata():
+    info = models.ModelInfo(
+        hf_id="x", weights_gb=1.0, n_layers=4, growing_layers=2, kv_heads=None,
+        head_dim=None, hidden_size=1024, max_context=32768, cache_type="standard",
+        can_quantize_kv=True, layer_types={},
+    )
+    assert info.estimated_slope_gb_per_k() == 0.0

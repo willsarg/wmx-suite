@@ -9,20 +9,23 @@ def _model_info(
     is_causal: bool = True,
     can_quantize_kv: bool = True,
     max_context: int = 32768,
+    kv_heads: int | None = 8,
+    head_dim: int | None = 128,
+    growing_layers: int = 2,
 ) -> models.ModelInfo:
     return models.ModelInfo(
         hf_id="mlx-community/test",
         weights_gb=weights_gb,
         n_layers=4,
-        growing_layers=2,
-        kv_heads=8,
-        head_dim=128,
+        growing_layers=growing_layers,
+        kv_heads=kv_heads,
+        head_dim=head_dim,
         hidden_size=1024,
         max_context=max_context,
         cache_type="standard",
         can_quantize_kv=can_quantize_kv,
         is_causal=is_causal,
-        layer_types={"full_attention": 2, "linear_attention": 2},
+        layer_types={"full_attention": growing_layers, "linear_attention": 4 - growing_layers},
     )
 
 
@@ -184,3 +187,33 @@ def test_calibrate_aborts_when_live_pressure_high(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="aborting"):
         probe.calibrate("org/tiny", verbose=False)
     assert called["n"] == 0  # aborted BEFORE launching any rung
+
+
+def test_calibrate_gate_includes_slope_term(monkeypatch, tmp_path):
+    import pytest
+    from wmx_suite import db, models, probe, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 1, 15))
+    # model with real KV metadata so estimated_slope_gb_per_k() > 0
+    info = _model_info(weights_gb=0.5, is_causal=True, can_quantize_kv=True, max_context=32768,
+                       kv_heads=8, head_dim=128, growing_layers=2)
+    monkeypatch.setattr(models, "describe", lambda hf_id: info)
+    slope = info.estimated_slope_gb_per_k()
+    assert slope > 0
+    # base = live_base + model_base = 3.0 + (0.5*1.05 + 1.0) = 3.0 + 1.525 = 4.525
+    # threshold = wall - 2.0 = threshold_target + 2.0 - 2.0 = threshold_target
+    # Pick threshold so the 512-rung (slope*0.512) passes but the 2048-rung (slope*2.048) fails.
+    base_only = 3.0 + (0.5 * 1.05 + 1.0)            # = 4.525
+    threshold_target = base_only + slope * 2.048 - 0.001  # just below the 2048-rung prediction
+    wall = threshold_target + 2.0  # safe_threshold = wall - 2.0 margin = threshold_target
+    monkeypatch.setattr(probe, "read_limits", lambda: _limits(wall_gb=wall, wired_now_gb=3.0))
+    monkeypatch.setattr(probe, "sample_settled_baseline", lambda: 3.0)
+    called = {"n": 0}
+    monkeypatch.setattr(probe, "_measure_rung",
+                        lambda *a, **k: (called.__setitem__("n", called["n"] + 1) or
+                                         {"status": "ok", "repeats": 3, "delta": 1.0,
+                                          "mlx_peak_gb": 1.0, "os_wired_gb": 4.0, "spread_gb": 0.0}))
+    with pytest.raises(SystemExit, match="aborting"):
+        probe.calibrate("org/tiny", margin_gb=2.0, verbose=False)
+    # 512 rung: 4.525 + slope*0.512 < threshold -> launches; 2048 rung -> gate fires.
+    assert called["n"] == 1   # only the 512 rung ran before the 2048 gate aborted
