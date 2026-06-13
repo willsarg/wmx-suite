@@ -90,6 +90,10 @@ uv run wmx-suite run --dry-run --model <hf_id> --prompt "..."
 
 > `--force` overrides a refusal at your own risk; `--dry-run` prints the plan without launching.
 
+Every successful run records its prompt/generation **tokens-per-second** to the database
+(output still streams live — it runs under a PTY so the experience is unchanged). `list`
+then shows the median gen speed per model. Pass `--no-log` for a bare passthrough.
+
 ---
 
 ## 🗂️ Layout
@@ -98,7 +102,7 @@ uv run wmx-suite run --dry-run --model <hf_id> --prompt "..."
 wmx_suite/
   system.py         # device wall, swap, current wired memory
   models.py         # HF-cache config reader + memory-class classifier
-  db.py             # SQLite schema: models, probe_runs, measurements, fits
+  db.py             # SQLite schema: models, probe_runs, measurements, fits, generation_log
   probe_worker.py   # ONE isolated (model, context) measurement -> JSON
   probe.py          # safe ramp orchestrator + linear fit + ceiling solve
   cli.py            # command-line entry point

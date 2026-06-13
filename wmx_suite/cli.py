@@ -10,8 +10,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
+import pty
+import re
+import signal
+import struct
+import subprocess
 import sys
+import termios
+from statistics import median
 
 from . import db, launcher, models, probe
 from .system import read_limits, sample_settled_baseline
@@ -131,10 +139,15 @@ def cmd_list(_):
     if not rows:
         print("no characterized models yet — run `characterize <hf_id>`")
         return
+    speeds = db.gen_speeds(con)
     for r in rows:
-        print(f"  {r['hf_id']:46} base={r['model_base_gb']:5.1f}GB "
-              f"slope={r['slope_gb_per_k']:.4f}  safe≈{r['safe_ceiling_ctx']:>7,}  "
-              f"wall≈{r['hard_wall_ctx']:>7,}  (R²={r['r2']})")
+        line = (f"  {r['hf_id']:46} base={r['model_base_gb']:5.1f}GB "
+                f"slope={r['slope_gb_per_k']:.4f}  safe≈{r['safe_ceiling_ctx']:>7,}  "
+                f"wall≈{r['hard_wall_ctx']:>7,}  (R²={r['r2']})")
+        s = speeds.get(r["hf_id"])
+        if s:
+            line += f"  gen≈{median(s):.1f} tok/s (n={len(s)})"
+        print(line)
 
 
 RUN_HELP = """usage: wmx-suite run [--margin GB] [--force] [--dry-run] -- <mlx_lm.generate args>
@@ -146,7 +159,72 @@ The passthrough args must include --model <hf_id>.
   --margin GB   safety cushion under the wall (default 2.0)
   --force       launch even if the planner refuses (may crash the machine)
   --dry-run     print the plan, do not launch
+  --no-log      do not record generation speed (bare exec passthrough)
 """
+
+_PROMPT_RE = re.compile(r"Prompt:\s*(\d+)\s*tokens,\s*([\d.]+)\s*tokens-per-sec")
+_GEN_RE = re.compile(r"Generation:\s*(\d+)\s*tokens,\s*([\d.]+)\s*tokens-per-sec")
+_PEAK_RE = re.compile(r"Peak memory:\s*([\d.]+)\s*GB")
+
+
+def _record_generation(text: str, model_id: str, max_kv_size: int) -> None:
+    """Parse mlx_lm's tok/s lines from captured output and store them. Best-effort —
+    a cancelled or errored run has no generation stats, so nothing is logged."""
+    gm = _GEN_RE.search(text)
+    if not gm:
+        return
+    pm, km = _PROMPT_RE.search(text), _PEAK_RE.search(text)
+    try:
+        con = db.connect()
+        db.log_generation(
+            con, model_id,
+            prompt_tokens=int(pm.group(1)) if pm else None,
+            prompt_tps=float(pm.group(2)) if pm else None,
+            gen_tokens=int(gm.group(1)),
+            gen_tps=float(gm.group(2)),
+            peak_gb=float(km.group(1)) if km else None,
+            max_kv_size=max_kv_size,
+        )
+        print(f"[run] logged {gm.group(1)} tok @ {float(gm.group(2)):.1f} tok/s", file=sys.stderr)
+    except Exception as e:  # logging must never break a run
+        print(f"[run] (speed log failed: {e})", file=sys.stderr)
+
+
+def _exec_logged(argv: list[str], model_id: str, max_kv_size: int) -> None:
+    """Run mlx_lm.generate under a PTY so output streams live to the terminal unchanged,
+    while we capture a copy to parse its tok/s stats. A PTY (not a plain pipe) is required:
+    Python block-buffers stdout when it isn't a tty, which would batch the token stream."""
+    master, slave = pty.openpty()
+    if sys.stdout.isatty():  # match the child's window size so tqdm renders correctly
+        try:
+            cols, rows = os.get_terminal_size(sys.stdout.fileno())
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        except Exception:
+            pass
+    proc = subprocess.Popen(["mlx_lm.generate"] + argv,
+                            stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+    os.close(slave)
+    captured = bytearray()
+    try:
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:  # EIO once the child exits and closes its end
+                break
+            if not data:
+                break
+            os.write(1, data)  # tee live to our stdout, byte-for-byte
+            captured.extend(data)
+    except KeyboardInterrupt:
+        try:
+            proc.send_signal(signal.SIGINT)
+        except Exception:
+            pass
+    finally:
+        os.close(master)
+    rc = proc.wait()
+    _record_generation(captured.decode(errors="replace"), model_id, max_kv_size)
+    sys.exit(rc)
 
 
 def cmd_run_raw(run_args: list[str]):
@@ -155,7 +233,7 @@ def cmd_run_raw(run_args: list[str]):
     Done manually (not argparse) because argparse.REMAINDER mishandles optionals that
     precede the positional, and we want `run --model X ...` to work as a drop-in.
     """
-    margin, force, dry = 2.0, False, False
+    margin, force, dry, log = 2.0, False, False, True
     i = 0
     while i < len(run_args):
         a = run_args[i]
@@ -167,14 +245,16 @@ def cmd_run_raw(run_args: list[str]):
             force = True; i += 1; continue
         if a == "--dry-run":
             dry = True; i += 1; continue
+        if a == "--no-log":
+            log = False; i += 1; continue
         break  # first non-suite token: the rest is passthrough
     rest = run_args[i:]
     if rest and rest[0] == "--":
         rest = rest[1:]
-    _run(rest, margin=margin, force=force, dry_run=dry)
+    _run(rest, margin=margin, force=force, dry_run=dry, log=log)
 
 
-def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool):
+def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool, log: bool = True):
     """Crash-safe launch: plan a launch, then exec mlx_lm.generate."""
     model_id = None
     for i, a in enumerate(rest):
@@ -210,7 +290,10 @@ def _run(rest: list[str], *, margin: float, force: bool, dry_run: bool):
     if dry_run:
         print("[run] --dry-run: not launching.", file=sys.stderr)
         return
-    os.execvp("mlx_lm.generate", ["mlx_lm.generate"] + argv)
+    if log:
+        _exec_logged(argv, model_id, p["max_kv_size"])
+    else:
+        os.execvp("mlx_lm.generate", ["mlx_lm.generate"] + argv)
 
 
 def _main_argparse():

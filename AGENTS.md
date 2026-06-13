@@ -80,7 +80,7 @@ at non-trivial context.
 wmx_suite/
   system.py         # device wall, swap, current wired memory
   models.py         # HF-cache config reader + memory-class classifier
-  db.py             # SQLite schema: models, probe_runs, measurements, fits
+  db.py             # SQLite schema: models, probe_runs, measurements, fits, generation_log
   probe_worker.py   # ONE isolated (model, context) measurement -> JSON line
   probe.py          # safe ramp orchestrator + linear fit + ceiling solve
   cli.py            # entry point
@@ -93,8 +93,9 @@ solve for safe ceiling and hard wall.
 ## Architecture (launch path)
 
 ```
-launcher.py   # plan(): cache-aware kv-bits + measured/estimated --max-kv-size + refuse gate
-cli.py run    # parses passthrough args, prints the plan, execs mlx_lm.generate
+launcher.py   # plan() + predict(): cache-aware kv-bits, --max-kv-size cap, refuse gate
+cli.py run    # parses passthrough args, prints the plan, execs mlx_lm.generate (PTY-tee
+              # by default to log tok/s; --no-log falls back to bare execvp)
 ```
 
 `run` is intercepted in `cli.main()` before argparse so it can forward arbitrary flags to

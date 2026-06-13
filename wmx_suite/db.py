@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS measurements (
     FOREIGN KEY (run_id) REFERENCES probe_runs(id)
 );
 
+CREATE TABLE IF NOT EXISTS generation_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    hf_id          TEXT NOT NULL,
+    prompt_tokens  INTEGER,
+    gen_tokens     INTEGER,
+    prompt_tps     REAL,
+    gen_tps        REAL,
+    peak_gb        REAL,             -- mlx self-reported (undercounts wired; for reference only)
+    max_kv_size    INTEGER,          -- the context cap the launcher set for this run
+    created_at     TEXT,
+    FOREIGN KEY (hf_id) REFERENCES models(hf_id)
+);
+
 CREATE TABLE IF NOT EXISTS fits (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id           INTEGER NOT NULL,
@@ -119,6 +132,28 @@ def add_measurement(con: sqlite3.Connection, run_id: int, context: int, *,
         (run_id, context, mlx_peak_gb, mlx_true_gb, os_wired_gb, status, note),
     )
     con.commit()
+
+
+def log_generation(con: sqlite3.Connection, hf_id: str, *, prompt_tokens=None,
+                   gen_tokens=None, prompt_tps=None, gen_tps=None, peak_gb=None,
+                   max_kv_size=None) -> None:
+    con.execute(
+        "INSERT INTO generation_log (hf_id, prompt_tokens, gen_tokens, prompt_tps, "
+        "gen_tps, peak_gb, max_kv_size, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (hf_id, prompt_tokens, gen_tokens, prompt_tps, gen_tps, peak_gb, max_kv_size, _now()),
+    )
+    con.commit()
+
+
+def gen_speeds(con: sqlite3.Connection) -> dict[str, list[float]]:
+    """Map of hf_id -> list of recorded generation tokens-per-sec (for median in `list`)."""
+    rows = con.execute(
+        "SELECT hf_id, gen_tps FROM generation_log WHERE gen_tps IS NOT NULL"
+    ).fetchall()
+    out: dict[str, list[float]] = {}
+    for r in rows:
+        out.setdefault(r["hf_id"], []).append(float(r["gen_tps"]))
+    return out
 
 
 def latest_fit(con: sqlite3.Connection, hf_id: str) -> dict | None:
