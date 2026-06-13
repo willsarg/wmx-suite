@@ -17,6 +17,7 @@ Strategy:
 from __future__ import annotations
 
 import json
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -31,6 +32,8 @@ MIN_PROBE_CTX = 512  # supervised calibration probe — deep in the safe zone
 DEFAULT_REPEATS = 3  # N-repeat median per rung, to smooth prefill-transient sampling jitter
 # rough base-footprint estimate (GB): weights resident + fixed overhead, on top of the
 # live system baseline. Calibrated loosely on Gemma/Qwen; refined as more models run.
+# profiles.py is the source of truth for these cold-start defaults; aliased here for
+# backward references (tests / readers). Do not redefine — change them in profiles.py.
 RESIDENT_FACTOR = profiles.DEFAULT_RESIDENT_FACTOR
 FIXED_OVERHEAD_GB = profiles.DEFAULT_FIXED_OVERHEAD_GB
 
@@ -71,7 +74,7 @@ def _solve_ctx(model_base: float, slope_per_k: float, ref_baseline: float,
     return int(max(0.0, headroom / slope_per_k) * 1000)
 
 
-def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, con) -> float:
+def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, con: sqlite3.Connection) -> float:
     """Pre-flight guess of ABSOLUTE base (context->0) OS-wired footprint, before any probe."""
     factor, overhead, _ = profiles.cold_start_constants(con)
     os_baseline = max(limits.wired_now_gb, 2.5)
