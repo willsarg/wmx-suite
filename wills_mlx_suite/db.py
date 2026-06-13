@@ -52,12 +52,13 @@ CREATE TABLE IF NOT EXISTS measurements (
 CREATE TABLE IF NOT EXISTS fits (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id           INTEGER NOT NULL,
-    intercept_gb     REAL,               -- os_wired at context -> 0 (base footprint)
+    model_base_gb    REAL,               -- DELTA intercept: model's own wired footprint at c->0 (invariant)
     slope_gb_per_k   REAL,               -- GB per 1000 tokens
     r2               REAL,
+    ref_baseline_gb  REAL,               -- live system baseline used for the ceiling calc
     threshold_gb     REAL,
-    safe_ceiling_ctx INTEGER,            -- context where predicted wired hits threshold
-    hard_wall_ctx    INTEGER,            -- context where predicted wired hits the 17.18 wall
+    safe_ceiling_ctx INTEGER,            -- context where (ref_baseline + model_base + slope*c) hits threshold
+    hard_wall_ctx    INTEGER,            -- ... hits the 17.18 wall
     n_points         INTEGER,
     created_at       TEXT,
     FOREIGN KEY (run_id) REFERENCES probe_runs(id)
@@ -122,8 +123,8 @@ def add_measurement(con: sqlite3.Connection, run_id: int, context: int, *,
 
 def save_fit(con: sqlite3.Connection, run_id: int, fit: dict) -> None:
     fit = {**fit, "run_id": run_id, "created_at": _now()}
-    keys = ["run_id", "intercept_gb", "slope_gb_per_k", "r2", "threshold_gb",
-            "safe_ceiling_ctx", "hard_wall_ctx", "n_points", "created_at"]
+    keys = ["run_id", "model_base_gb", "slope_gb_per_k", "r2", "ref_baseline_gb",
+            "threshold_gb", "safe_ceiling_ctx", "hard_wall_ctx", "n_points", "created_at"]
     con.execute(
         f"INSERT INTO fits ({', '.join(keys)}) VALUES ({', '.join('?' for _ in keys)})",
         tuple(fit.get(k) for k in keys),

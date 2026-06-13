@@ -53,13 +53,13 @@ def cmd_show(args):
 
 
 def cmd_characterize(args):
-    probe.characterize(args.hf_id, margin_gb=args.margin)
+    probe.characterize(args.hf_id, margin_gb=args.margin, allow_min_probe=args.min_probe)
 
 
 def cmd_list(_):
     con = db.connect()
     rows = con.execute(
-        "SELECT m.hf_id, m.weights_gb, m.cache_type, f.slope_gb_per_k, f.intercept_gb, "
+        "SELECT m.hf_id, m.cache_type, f.model_base_gb, f.slope_gb_per_k, f.ref_baseline_gb, "
         "f.safe_ceiling_ctx, f.hard_wall_ctx, f.r2 "
         "FROM fits f JOIN probe_runs r ON f.run_id=r.id JOIN models m ON r.hf_id=m.hf_id "
         "GROUP BY m.hf_id HAVING f.id=MAX(f.id) ORDER BY m.hf_id"
@@ -68,7 +68,8 @@ def cmd_list(_):
         print("no characterized models yet — run `characterize <hf_id>`")
         return
     for r in rows:
-        print(f"  {r['hf_id']:48} safe≈{r['safe_ceiling_ctx']:>7,}  "
+        print(f"  {r['hf_id']:46} base={r['model_base_gb']:5.1f}GB "
+              f"slope={r['slope_gb_per_k']:.4f}  safe≈{r['safe_ceiling_ctx']:>7,}  "
               f"wall≈{r['hard_wall_ctx']:>7,}  (R²={r['r2']})")
 
 
@@ -79,7 +80,11 @@ def main():
     sub.add_parser("scan").set_defaults(func=cmd_scan)
     p = sub.add_parser("show"); p.add_argument("hf_id"); p.set_defaults(func=cmd_show)
     p = sub.add_parser("characterize"); p.add_argument("hf_id")
-    p.add_argument("--margin", type=float, default=2.0); p.set_defaults(func=cmd_characterize)
+    p.add_argument("--margin", type=float, default=2.0)
+    p.add_argument("--min-probe", action="store_true",
+                   help="for borderline models, run a supervised 512-token probe to measure "
+                        "the true base instead of refusing on the pessimistic estimate")
+    p.set_defaults(func=cmd_characterize)
     sub.add_parser("list").set_defaults(func=cmd_list)
     args = ap.parse_args()
     args.func(args)
