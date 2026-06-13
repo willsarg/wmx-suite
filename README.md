@@ -10,6 +10,7 @@
 [![Built with MLX](https://img.shields.io/badge/Built_with-MLX-FF6F61.svg?style=for-the-badge)](https://github.com/ml-explore/mlx)
 [![packaged with uv](https://img.shields.io/badge/packaged_with-uv-DE5FE9.svg?style=for-the-badge)](https://github.com/astral-sh/uv)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](./CONTRIBUTING.md)
+[![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-FFDD00.svg?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/willsarg)
 
 </div>
 
@@ -117,6 +118,16 @@ Contributions are welcome — especially **memory-benchmark results from other A
 Silicon SKUs**, which is how the suite becomes trustworthy beyond the reference M4 Pro.
 See [CONTRIBUTING.md](./CONTRIBUTING.md). The prime directive applies to every change:
 *never ship something that can crash a machine.*
+
+## ☕ Support
+
+If wmx-suite saved you a kernel panic (or you just like the idea), you can buy me a coffee:
+
+<div align="center">
+
+<a href="https://www.buymeacoffee.com/willsarg" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" width="217" height="60"></a>
+
+</div>
 
 ## ⚖️ Trademarks
 
