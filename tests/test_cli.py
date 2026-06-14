@@ -7,6 +7,13 @@ import pytest
 
 from wmx_suite import cli, config
 from wmx_suite.system import SystemLimits
+from wmx_suite.ui import Console
+
+
+def _ns(**kw):
+    """Args namespace with a no-color Console (so command output is plain text)."""
+    kw.setdefault("console", Console(color=False, verbose=False))
+    return SimpleNamespace(**kw)
 
 
 class _Tokenizer:
@@ -289,9 +296,12 @@ def test_system_displays_configured_margin(monkeypatch, tmp_path, capsys):
         ),
     )
 
-    cli.cmd_system(None)
+    cli.cmd_system(_ns())
 
-    assert "safe threshold       : 14.00 GB  (wall − 3GB margin)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "safe budget" in out
+    assert "14.00 GB" in out
+    assert "− 3 GB margin" in out
 
 
 def test_health_uses_environment_margin(monkeypatch, capsys):
@@ -319,9 +329,12 @@ def test_health_uses_environment_margin(monkeypatch, capsys):
     monkeypatch.setattr(cli, "sample_settled_baseline", lambda: 3.0)
     monkeypatch.setattr(cli.db, "connect", EmptyConnection)
 
-    cli.cmd_health(SimpleNamespace(margin=None))
+    cli.cmd_health(_ns(margin=None))
 
-    assert "safe threshold      : 14.00 GB  (wall − 3GB margin)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "safe budget" in out
+    assert "14.00 GB" in out
+    assert "3 GB margin" in out
 
 
 def test_characterize_uses_environment_margin(monkeypatch):
@@ -389,7 +402,7 @@ def test_list_warns_when_fit_is_stale(monkeypatch, capsys):
     monkeypatch.setattr(cli.db, "gen_speeds", lambda _con: {})
     monkeypatch.setattr(cli.models, "fit_is_stale", lambda _hf_id, _created: True)
 
-    cli.cmd_list(None)
+    cli.cmd_list(_ns())
 
     assert "fit may be stale" in capsys.readouterr().out
 
@@ -677,7 +690,7 @@ def test_health_warns_when_no_profile(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 25769803776, 15))
     monkeypatch.setattr(cli, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
     monkeypatch.setattr(cli, "sample_settled_baseline", lambda: 3.0)
-    cli.cmd_health(SimpleNamespace(margin=None))
+    cli.cmd_health(_ns(margin=None))
     out = capsys.readouterr().out
     assert "No calibration profile" in out
     assert "calibrate" in out
@@ -689,9 +702,11 @@ def test_system_reports_no_profile(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
     monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M4 Pro", 25769803776, 15))
     monkeypatch.setattr(cli, "read_limits", lambda: _limits(wall_gb=17.0, wired_now_gb=3.0))
-    cli.cmd_system(SimpleNamespace())
+    cli.cmd_system(_ns())
     out = capsys.readouterr().out
-    assert "calibration profile" in out.lower()
+    assert "calibration" in out.lower()
+    assert "uncalibrated" in out.lower()
+    assert "calibrate" in out.lower()
 
 
 def test_health_no_profile_warning_generalizes_to_non_testbed_machine(
@@ -712,7 +727,7 @@ def test_health_no_profile_warning_generalizes_to_non_testbed_machine(
         ),
     )
     monkeypatch.setattr(cli, "sample_settled_baseline", lambda: 2.0)
-    cli.cmd_health(SimpleNamespace(margin=None))
+    cli.cmd_health(_ns(margin=None))
     out = capsys.readouterr().out
     assert "No calibration profile" in out
     assert "Apple M2" in out          # reports the actual machine, not a hardcoded testbed

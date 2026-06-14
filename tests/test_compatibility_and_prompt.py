@@ -65,17 +65,18 @@ def test_scan_filters_non_causal(monkeypatch):
     upserted = []
     monkeypatch.setattr(db, "connect", lambda: MagicMock())
     monkeypatch.setattr(db, "upsert_model", lambda con, info: upserted.append(info))
-    
-    # Capture print output
-    printed = []
-    monkeypatch.setattr("builtins.print", lambda *args: printed.append(" ".join(map(str, args))))
-    
-    cmd_scan(None)
-    
+
+    # Capture rendered output via a no-color Console writing to a buffer.
+    import io
+    from types import SimpleNamespace
+    from wmx_suite.ui import Console
+    buf = io.StringIO()
+    cmd_scan(SimpleNamespace(console=Console(color=False, verbose=False, stream=buf)))
+
     # Should only upsert the causal model
     assert len(upserted) == 1
     # Check that registered count is 1
-    assert "registered 1 models" in printed[-1]
+    assert "registered 1 models" in buf.getvalue()
 
 
 def test_run_prompts_for_characterization(monkeypatch):

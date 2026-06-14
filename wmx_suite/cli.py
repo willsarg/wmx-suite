@@ -27,6 +27,13 @@ from mlx_lm.utils import load_tokenizer
 from . import config, db, launcher, models, probe, profiles
 from .system import read_limits, sample_settled_baseline
 from .ui import Console
+from .views import health as view_health
+from .views import landing as view_landing
+from .views import list as view_list
+from .views import scan as view_scan
+from .views import show as view_show
+from .views import system as view_system
+from .views import run_messages as view_run
 
 # Default Console for the `run` fast path; main() replaces it per-invocation.
 CONSOLE = Console.from_args()
@@ -104,72 +111,66 @@ def _stream_worker(
     return proc.returncode, stderr_text
 
 
-def cmd_system(_):
+def _strip_prefix(model_id: str) -> str:
+    return model_id.split("/", 1)[-1] if "/" in model_id else model_id
+
+
+def cmd_system(args):
     s = read_limits()
     margin = _configured_margin()
-    print(f"device              : {s.device}")
-    print(f"total RAM           : {s.total_gb:.2f} GB")
-    print(f"crash wall          : {s.wall_gb:.2f} GB  (max_recommended_working_set_size)")
-    print(f"max single buffer   : {s.max_buffer_gb:.2f} GB")
-    print(f"swap free           : {s.swap_free_gb:.2f} GB" if s.swap_free_gb is not None
-          else "swap free           : unknown")
-    print(f"wired now (baseline): {s.wired_now_gb:.2f} GB")
-    print(f"safe threshold       : {s.safe_threshold_gb(margin):.2f} GB  "
-          f"(wall − {margin:g}GB margin)")
+    safe = s.safe_threshold_gb(margin)
     con = db.connect()
     prof = db.get_profile(con, profiles.machine_key())
-    if prof:
-        print(f"calibration profile : overhead {prof['fixed_overhead_gb']:.2f} GB "
-              f"(model {prof['model_id']}, {prof['calibrated_at']})")
-    else:
-        print("calibration profile : none — using M4 Pro testbed cold-start priors; "
-              "run 'wmx-suite calibrate' to tune for this machine")
+    swap = s.swap_free_gb
+    data = {
+        "device": s.device,
+        "total_gb": s.total_gb,
+        "wall_gb": s.wall_gb,
+        "safe_budget_gb": safe,
+        "wired_gb": s.wired_now_gb,
+        "free_headroom_gb": safe - s.wired_now_gb,
+        "max_buffer_gb": s.max_buffer_gb,
+        "swap_free_gb": swap,
+        "swap_warn": swap is not None and swap < 2.0,
+        "margin_gb": margin,
+        "margin_source": ("WMX_SUITE_MARGIN_GB"
+                          if os.environ.get("WMX_SUITE_MARGIN_GB") else "default"),
+        "wall_bytes": int(round(s.wall_gb * 1e9)),
+        "wired_sample": "median of 3 @ 0.2s",
+        "calibrated": prof is not None,
+        "cal_model_short": _strip_prefix(prof["model_id"]) if prof else "",
+        "cal_overhead_gb": prof["fixed_overhead_gb"] if prof else 0.0,
+        "cal_date": (prof["calibrated_at"][:10] if prof else ""),
+    }
+    view_system.render(args.console, data)
+
+
+def _safe_ctx_str(pred) -> str:
+    """Human label for a model's safe-context verdict (caller-side policy)."""
+    if pred.breaches_wall:
+        return "over budget — won't load"
+    if pred.safe_ctx < launcher.MIN_USEFUL_CTX:
+        return f"only ~{pred.safe_ctx:,} tok (too small)"
+    return f"~{int(round(pred.safe_ctx, -2)):,} tokens"
 
 
 def cmd_health(args):
     """Live 'can I run things safely right now?' snapshot: system pressure + per-model go/no-go."""
-    color = sys.stdout.isatty()
-
-    def c(text, name):
-        codes = {"green": "32", "red": "31", "yellow": "33"}
-        return f"\033[{codes[name]}m{text}\033[0m" if color else text
-
     margin = _configured_margin(args.margin)
     s = read_limits()
     threshold = s.safe_threshold_gb(margin)
     live_base = sample_settled_baseline()  # same baseline `run` uses, sampled once
 
-    print(f"device              : {s.device}")
-    print(f"crash wall          : {s.wall_gb:.2f} GB")
-    print(f"safe threshold      : {threshold:.2f} GB  (wall − {margin:g}GB margin)")
-    if s.swap_free_gb is None:
-        print("swap free           : unknown")
-    elif s.swap_free_gb < 2.0:
-        print(f"swap free           : {s.swap_free_gb:.2f} GB   "
-              + c("⚠ low — crossing the wall may hard-lock", "yellow"))
-    else:
-        print(f"swap free           : {s.swap_free_gb:.2f} GB")
-    print(f"wired now           : {live_base:.2f} GB")
-    print(f"free headroom       : {threshold - live_base:.2f} GB  (threshold − wired now)")
-
     con = db.connect()
     key = profiles.machine_key()
-    if db.get_profile(con, key) is None:
-        dev, ram, osv = key
-        print(f"\nNo calibration profile for {dev}/{ram / 1e9:.0f}GB/macOS {osv}; "
-              "cold-start estimates fall back to M4 Pro testbed priors. "
-              "Run 'wmx-suite calibrate' to tune for this machine.")
+    calibrated = db.get_profile(con, key) is not None
     rows = con.execute(
         "SELECT DISTINCT m.hf_id, m.max_context FROM models m "
         "JOIN probe_runs r ON r.hf_id = m.hf_id JOIN fits f ON f.run_id = r.id "
         "ORDER BY m.hf_id"
     ).fetchall()
-    if not rows:
-        print("\nno characterized models yet — run `characterize <hf_id>`")
-        return
 
-    print("\ncharacterized models — can it load & run safely now?")
-    width = max(len(r["hf_id"]) for r in rows)
+    model_rows = []
     for r in rows:
         fit = db.latest_fit(con, r["hf_id"])
         if not fit or not fit.get("slope_gb_per_k"):
@@ -181,44 +182,94 @@ def cmd_health(args):
             wall_gb=s.wall_gb, model_max=r["max_context"],
         )
         go = (not pred.breaches_wall) and pred.safe_ctx >= launcher.MIN_USEFUL_CTX
-        glyph = c("✓", "green") if go else c("✗", "red")
-        hr = f"{'+' if pred.headroom_gb >= 0 else '-'}{abs(pred.headroom_gb):.2f}GB"
-        if pred.breaches_wall:
-            tail = c("won't load safely", "red")
-        elif not go:
-            tail = c(f"safe≈{pred.safe_ctx:,} ctx (too small)", "red")
-        else:
-            tail = f"safe≈{pred.safe_ctx:,} ctx"
-        print(f"  {glyph}  {r['hf_id']:<{width}}  base {pred.base_abs_gb:5.2f}GB  "
-              f"{hr:>9}  {tail}")
+        model_rows.append({
+            "name": _strip_prefix(r["hf_id"]),
+            "loads_gb": pred.base_abs_gb,
+            "spare_gb": pred.headroom_gb,
+            "safe_ctx": pred.safe_ctx,
+            "safe_ctx_str": _safe_ctx_str(pred),
+            "ok": go,
+            "base_gb": float(fit["model_base_gb"]),
+            "slope_gb_per_k": float(fit["slope_gb_per_k"]),
+            "safe_cap_tok": pred.safe_ctx,
+        })
+
+    swap = s.swap_free_gb
+    data = {
+        "wall_gb": s.wall_gb,
+        "safe_budget_gb": threshold,
+        "free_now_gb": threshold - live_base,
+        "swap_free_gb": swap,
+        "swap_warn": swap is not None and swap < 2.0,
+        "margin_gb": margin,
+        "baseline_gb": live_base,
+        "baseline_sample": "median of 3",
+        "models": model_rows,
+    }
+    view_health.render(args.console, data)
+    if not calibrated:
+        dev, ram, osv = key
+        args.console.emit()
+        args.console.emit(args.console.style(
+            "warn",
+            f"No calibration profile for {dev} / {ram / 1e9:.0f}GB / macOS {osv}; "
+            "cold-start estimates use fallback priors — run 'wmx-suite calibrate'."))
 
 
-def cmd_scan(_):
+def cmd_scan(args):
     con = db.connect()
     found = models.scan_cache()
-    n = 0
+    model_rows = []
     for hf_id in found:
         info = models.describe(hf_id)
         if info is None or not info.is_causal:
             continue
         db.upsert_model(con, info.as_dict())
-        n += 1
-        flag = "quantizable" if info.can_quantize_kv else "fp16-only (RotatingKVCache)"
-        print(f"  {hf_id:60} {info.weights_gb:5.1f}GB  {flag}")
-    print(f"registered {n} models")
+        model_rows.append({
+            "hf_id": hf_id,
+            "weights_gb": info.weights_gb,
+            "weights_gb_exact": info.weights_gb,
+            "kv_label": ("quantizable KV" if info.can_quantize_kv
+                         else "fp16-only KV (sliding-window cache)"),
+            "cache_type": info.as_dict().get("cache_type", ""),
+        })
+    view_scan.render(args.console, {"models": model_rows, "registered": len(model_rows)})
 
 
 def cmd_show(args):
     info = models.describe(args.hf_id)
     if info is None:
-        raise SystemExit(f"not found in cache: {args.hf_id}")
+        view_run.render_not_found(args.console, {
+            "model": args.hf_id,
+            "cache_path": os.environ.get("HF_HOME", "~/.cache/huggingface/hub"),
+            "hf_home_set": "HF_HOME" in os.environ,
+        })
+        raise SystemExit(1)
     if not info.is_causal:
         print(f"WARNING: Model {args.hf_id} is in HF cache but is not a supported causal language model.")
-    for k, v in info.as_dict().items():
-        print(f"  {k:18}: {v}")
+    d = info.as_dict()
     bpt = info.fp16_kv_bytes_per_token()
-    print(f"  fp16 KV bytes/token: {bpt:.0f} "
-          f"(~{bpt * 1000 / 1e9:.4f} GB per 1k tokens)")
+    cache_type = d["cache_type"]
+    data = {
+        "hf_id": args.hf_id,
+        "weights_gb": info.weights_gb,
+        "n_layers": d["n_layers"],
+        "growing_layers": d["growing_layers"],
+        "max_context": d["max_context"],
+        "kv_label": (f"sliding-window ({cache_type})" if not info.can_quantize_kv
+                     else f"standard ({cache_type})"),
+        "can_quantize_kv": info.can_quantize_kv,
+        "growth_gb_per_1k": bpt * 1000 / 1e9,
+        "cache_type": cache_type,
+        "kv_heads": d["kv_heads"],
+        "head_dim": d["head_dim"],
+        "hidden_size": d["hidden_size"],
+        "layer_types": str(d["layer_types"]),
+        "max_kv_size_enforced": d["max_kv_size_enforced"],
+        "is_causal": d["is_causal"],
+        "fp16_kv_bytes_per_token": int(bpt),
+    }
+    view_show.render(args.console, data)
 
 
 def cmd_characterize(args):
@@ -243,23 +294,45 @@ def cmd_calibrate(args):
     print("=" * 60)
 
 
-def cmd_list(_):
+def _fit_quality(r2: float) -> str:
+    if r2 >= 0.99:
+        return "good"
+    if r2 >= 0.95:
+        return "ok"
+    return "poor"
+
+
+def cmd_list(args):
     con = db.connect()
     rows = db.latest_fits(con)
     if not rows:
-        print("no characterized models yet — run `characterize <hf_id>`")
+        view_run.render_no_models(args.console, {})
         return
     speeds = db.gen_speeds(con)
+    model_rows = []
     for r in rows:
-        line = (f"  {r['hf_id']:46} base={r['model_base_gb']:5.1f}GB "
-                f"slope={r['slope_gb_per_k']:.4f}  safe≈{r['safe_ceiling_ctx']:>7,}  "
-                f"wall≈{r['hard_wall_ctx']:>7,}  (R²={r['r2']})")
         s = speeds.get(r["hf_id"])
-        if s:
-            line += f"  gen≈{median(s):.1f} tok/s (n={len(s)})"
-        if models.fit_is_stale(r["hf_id"], r["characterized_at"]):
-            line += "  WARNING: fit may be stale — consider re-running characterize"
-        print(line)
+        model_rows.append({
+            "hf_id": r["hf_id"],
+            "loads_gb": r["model_base_gb"],
+            "safe_ctx": r["safe_ceiling_ctx"],
+            "speed_tps": median(s) if s else None,
+            "fit": _fit_quality(r["r2"]),
+            "tight": r["safe_ceiling_ctx"] < 8192,
+            "stale": models.fit_is_stale(r["hf_id"], r["characterized_at"]),
+            "slope_gb_per_k": r["slope_gb_per_k"],
+            "r2": r["r2"],
+            "hard_wall_ctx": r["hard_wall_ctx"],
+            "n_runs": len(s) if s else 0,
+        })
+    view_list.render(args.console, {"models": model_rows})
+    stale = [m["hf_id"] for m in model_rows if m["stale"]]
+    if stale:
+        args.console.emit()
+        for hf_id in stale:
+            args.console.emit(args.console.style(
+                "warn", f"⚠ {_strip_prefix(hf_id)}: fit may be stale — "
+                        "re-run 'wmx-suite characterize'."))
 
 
 def cmd_web(args):
@@ -1370,11 +1443,31 @@ def _strip_global_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
 def cmd_landing(console: Console) -> None:
     """Front door: shown for `wmx-suite` with no subcommand.
 
-    Placeholder until Phase 2's ``render_landing`` — for now it prints the
-    command overview so a bare invocation is helpful instead of an argparse
-    error. ``console`` carries the --verbose/--no-color policy.
+    Gathers a live machine status line and renders the grouped command
+    overview. ``console`` carries the --verbose/--no-color policy. Degrades
+    gracefully if the machine can't be read (shows the screen with zeros).
     """
-    _build_parser().print_help(console.stream)
+    try:
+        s = read_limits()
+        margin = _configured_margin()
+        safe = s.safe_threshold_gb(margin)
+        con = db.connect()
+        n_ready = con.execute(
+            "SELECT COUNT(DISTINCT m.hf_id) FROM models m "
+            "JOIN probe_runs r ON r.hf_id = m.hf_id JOIN fits f ON f.run_id = r.id"
+        ).fetchone()[0]
+        calibrated = db.get_profile(con, profiles.machine_key()) is not None
+        data = {
+            "device": s.device,
+            "free_gb": safe - s.wired_now_gb,
+            "safe_budget_gb": safe,
+            "models_ready": n_ready,
+            "calibrated": calibrated,
+        }
+    except Exception:
+        data = {"device": "unknown", "free_gb": 0.0, "safe_budget_gb": 0.0,
+                "models_ready": 0, "calibrated": False}
+    view_landing.render(console, data)
 
 
 def main():
