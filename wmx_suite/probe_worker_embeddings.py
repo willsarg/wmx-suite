@@ -60,14 +60,11 @@ def main() -> None:
         }), flush=True)
         sys.exit(1)
 
-    model, _tokenizer = mlx_embeddings.load(args.model)
-    embed_dtype = model.model.embeddings.tok_embeddings.weight.dtype
-    input_ids = mx.zeros((args.batch, args.seq), dtype=mx.int32)
-    attention_mask = mx.ones((args.batch, args.seq), dtype=embed_dtype)
-
     # Background OS-wired sampler: MLX may free per-layer buffers mid-forward, so a single
-    # post-eval read can miss the true high-water that gates LARGER cells.
-    hi = [0.0]
+    # post-eval read can miss the true high-water that gates LARGER cells. Start it BEFORE
+    # loading the model so the weight-load transient is captured too; seed with the current
+    # wired reading so an unscheduled sampler thread never reports a pathological 0.0.
+    hi = [system.wired_gb()]
     stop = [False]
 
     def sampler():
@@ -78,9 +75,15 @@ def main() -> None:
     t = threading.Thread(target=sampler, daemon=True)
     t.start()
 
-    # Always stop the sampler, even if the forward pass raises (e.g. OOM mid-run), so the
-    # thread can't outlive the work — matches probe_worker.py's discipline.
+    # Always stop the sampler (and join it before reading hi[0]), even if load or the
+    # forward pass raises (e.g. OOM mid-run), so the thread can't outlive the work and the
+    # final high-water read isn't racing an in-flight sample.
     try:
+        model, _tokenizer = mlx_embeddings.load(args.model)
+        embed_dtype = model.model.embeddings.tok_embeddings.weight.dtype
+        input_ids = mx.zeros((args.batch, args.seq), dtype=mx.int32)
+        attention_mask = mx.ones((args.batch, args.seq), dtype=embed_dtype)
+
         # Warmup (compile Metal graphs); not measured.
         out = model(input_ids, attention_mask=attention_mask)
         mx.eval(out.last_hidden_state)
@@ -98,6 +101,7 @@ def main() -> None:
             peaks.append(mx.get_peak_memory() / 1e9)
     finally:
         stop[0] = True
+        t.join(timeout=0.2)
 
     compute_time = statistics.median(compute_times)
     throughput_tps = (args.batch * args.seq) / compute_time if compute_time > 0 else 0.0

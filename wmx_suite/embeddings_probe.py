@@ -22,6 +22,7 @@ DEFAULT_SEQS = [128, 256, 512, 1024, 2048, 4096, 8192]
 MIN_FIT_POINTS = 3
 PRED_SAFETY = 1.25
 MODEL_BASE_SEED_GB = 1.0  # weight-residency seed so cold-start/pre-flight aren't zero
+CELL_TIMEOUT_S = 300  # kill a wedged cell subprocess rather than block the sweep forever
 
 # ModernBERT-base architecture constants (verified from config.json).
 NUM_LAYERS = 22
@@ -91,7 +92,11 @@ def _run_cell(py: str, model: str, batch: int, seq: int, repeats: int, margin: f
     cmd = [py, "-m", "wmx_suite.probe_worker_embeddings",
            "--model", model, "--batch", str(batch), "--seq", str(seq),
            "--repeats", str(repeats), "--margin", str(margin)]
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=CELL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"status": "error",
+                "note": f"worker timed out after {CELL_TIMEOUT_S}s at batch {batch} seq {seq}"}
     line = next((l for l in out.stdout.splitlines() if l.startswith("{")), None)
     if not line:
         return {"status": "error",
@@ -152,7 +157,9 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
 
             live_base = sample_settled_baseline()
             a, b = _coeffs(points)
-            model_base = _estimate_model_base(points, a, b)
+            # Monotone non-decreasing: a later fit can lower the compute coefficients, so
+            # never let the weight-residency term shrink below what earlier cells revealed.
+            model_base = max(model_base, _estimate_model_base(points, a, b))
             x1, x2 = batch * seq, batch * seq * seq
             predicted = live_base + model_base + PRED_SAFETY * (a * x1 + b * x2)
             if predicted >= threshold:
