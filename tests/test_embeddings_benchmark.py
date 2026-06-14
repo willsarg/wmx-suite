@@ -300,3 +300,27 @@ def test_cmd_benchmark_embeddings_worker_error_exits(monkeypatch, tmp_path, caps
         cli.cmd_benchmark_embeddings(args)
     assert ei.value.code == 1
     assert "ERROR at batch 1 seq 128" in capsys.readouterr().out
+
+
+def test_embedding_profile_roundtrip_and_key_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    con = db.connect()
+    key = ("Apple M4 Pro", 25769803776, 15, "0.31.2", "mlx-community/test-embed")
+    assert db.get_embedding_profile(con, key) is None
+
+    db.upsert_embedding_profile(con, key, coef_intercept_gb=1.07,
+                                coef_linear=2.1e-5, coef_quad=6.6e-9, n_points=20)
+    row = db.get_embedding_profile(con, key)
+    assert row["coef_intercept_gb"] == 1.07
+    assert row["coef_linear"] == 2.1e-5
+    assert row["coef_quad"] == 6.6e-9
+    assert row["n_points"] == 20
+    assert row["created_at"]
+
+    db.upsert_embedding_profile(con, key, coef_intercept_gb=2.0,
+                                coef_linear=3.0e-5, coef_quad=7.0e-9, n_points=30)
+    assert db.get_embedding_profile(con, key)["coef_intercept_gb"] == 2.0
+    assert con.execute("SELECT COUNT(*) FROM embedding_profiles").fetchone()[0] == 1
+
+    stale = ("Apple M4 Pro", 25769803776, 15, "0.32.0", "mlx-community/test-embed")
+    assert db.get_embedding_profile(con, stale) is None

@@ -216,6 +216,20 @@ CREATE TABLE IF NOT EXISTS embeddings_measurements (
     latency_ms     REAL NOT NULL,
     FOREIGN KEY (run_id) REFERENCES embeddings_runs(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS embedding_profiles (
+    device_name       TEXT NOT NULL,
+    total_ram_bytes   INTEGER NOT NULL,
+    macos_major       INTEGER NOT NULL,
+    mlx_version       TEXT NOT NULL,
+    model_id          TEXT NOT NULL,
+    coef_intercept_gb REAL NOT NULL,
+    coef_linear       REAL NOT NULL,
+    coef_quad         REAL NOT NULL,
+    n_points          INTEGER NOT NULL,
+    created_at        TEXT,
+    PRIMARY KEY (device_name, total_ram_bytes, macos_major, mlx_version, model_id)
+);
 """
 
 
@@ -755,6 +769,42 @@ def get_latest_embeddings_run(con: sqlite3.Connection) -> dict | None:
     return dict(row) if row else None
 
 
+# --- Embedding calibration profiles (per machine + MLX + model) ---
+def upsert_embedding_profile(
+    con: sqlite3.Connection,
+    key: tuple[str, int, int, str, str],
+    *,
+    coef_intercept_gb: float,
+    coef_linear: float,
+    coef_quad: float,
+    n_points: int,
+) -> None:
+    dev, ram, osv, mlxv, model_id = key
+    con.execute(
+        "INSERT INTO embedding_profiles "
+        "(device_name, total_ram_bytes, macos_major, mlx_version, model_id, "
+        " coef_intercept_gb, coef_linear, coef_quad, n_points, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(device_name, total_ram_bytes, macos_major, mlx_version, model_id) "
+        "DO UPDATE SET coef_intercept_gb=excluded.coef_intercept_gb, "
+        "coef_linear=excluded.coef_linear, coef_quad=excluded.coef_quad, "
+        "n_points=excluded.n_points, created_at=excluded.created_at",
+        (dev, ram, osv, mlxv, model_id, coef_intercept_gb, coef_linear, coef_quad,
+         n_points, _now()),
+    )
+    con.commit()
 
 
+def get_embedding_profile(
+    con: sqlite3.Connection, key: tuple[str, int, int, str, str]
+) -> dict | None:
+    dev, ram, osv, mlxv, model_id = key
+    row = con.execute(
+        "SELECT device_name, total_ram_bytes, macos_major, mlx_version, model_id, "
+        "coef_intercept_gb, coef_linear, coef_quad, n_points, created_at "
+        "FROM embedding_profiles WHERE device_name=? AND total_ram_bytes=? AND "
+        "macos_major=? AND mlx_version=? AND model_id=?",
+        (dev, ram, osv, mlxv, model_id),
+    ).fetchone()
+    return dict(row) if row else None
 
