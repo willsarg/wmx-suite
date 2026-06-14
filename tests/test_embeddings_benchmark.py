@@ -258,3 +258,45 @@ def test_cmd_benchmark_embeddings_persists_and_renders(monkeypatch, tmp_path, ca
     assert latest is not None
     rows = db.get_embeddings_measurements(con, latest["id"])
     assert len(rows) == 2
+
+
+def test_cmd_benchmark_embeddings_preflight_abort_exits(monkeypatch, tmp_path, capsys):
+    from wmx_suite import cli, db, embeddings_probe
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+
+    def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None,
+                   *, on_event=None, persist=True):
+        on_event({"event": "preflight_abort", "note": "host too hot"})
+        return {"model": model, "run_id": run_id, "n_cells_measured": 0,
+                "n_cells_skipped": 0, "aborted": True}
+
+    monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
+
+    args = SimpleNamespace(model="mlx-community/test", batches="1", seqs="128",
+                           repeats=1, margin=None)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_benchmark_embeddings(args)
+    assert ei.value.code == 1
+    assert "PRE-FLIGHT ABORT" in capsys.readouterr().out
+
+
+def test_cmd_benchmark_embeddings_worker_error_exits(monkeypatch, tmp_path, capsys):
+    from wmx_suite import cli, db, embeddings_probe
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+
+    def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None,
+                   *, on_event=None, persist=True):
+        on_event({"event": "error", "batch": 1, "seq": 128, "note": "worker blew up"})
+        return {"model": model, "run_id": run_id, "n_cells_measured": 0,
+                "n_cells_skipped": 0, "error": "worker blew up"}
+
+    monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
+
+    args = SimpleNamespace(model="mlx-community/test", batches="1", seqs="128",
+                           repeats=1, margin=None)
+    with pytest.raises(SystemExit) as ei:
+        cli.cmd_benchmark_embeddings(args)
+    assert ei.value.code == 1
+    assert "ERROR at batch 1 seq 128" in capsys.readouterr().out

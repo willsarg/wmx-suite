@@ -300,17 +300,18 @@ def cmd_benchmark_embeddings(args):
     con = db.connect()
     run_id = db.start_embeddings_run(con, args.model, mlx_version)
 
-    aborted = {"flag": False}
+    aborted = False
 
     def render(event):
+        nonlocal aborted
         ev = event.get("event")
         if ev == "preflight_abort":
             print(f"  PRE-FLIGHT ABORT: {event['note']}")
-            aborted["flag"] = True
+            aborted = True
         elif ev == "error":
             print(f"  ERROR at batch {event.get('batch')} seq {event.get('seq')}: "
                   f"{event.get('note')}")
-            aborted["flag"] = True
+            aborted = True
         elif ev == "row_skipped":
             pred = event.get("predicted_gb")
             pred_s = f"{pred:.2f} GB" if pred is not None else "pruned"
@@ -326,7 +327,7 @@ def cmd_benchmark_embeddings(args):
         repeats=args.repeats, margin_gb=margin_val, on_event=render,
     )
 
-    if aborted["flag"]:
+    if aborted:
         sys.exit(1)
 
     print("============================================================")
