@@ -150,9 +150,10 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
         margin_gb: safety cushion; resolved via config.margin_gb.
         mlx_version: MLX version string used as part of the profile key; when None,
             no profile is loaded and no profile is upserted at the end.
-        ignore_profile: when True, skip loading any stored calibration profile (stored
-            is passed as None to _coeffs); still upserts a new profile at the end if
-            enough points were collected.
+        ignore_profile: force a clean recalibration — run the sweep without seeding the
+            gate from any stored profile, then OVERWRITE the stored profile with this
+            run's freshly measured fit (still upserts at the end if enough points were
+            collected).
         on_event: optional callback invoked with one dict per event —
             {"event": "cell_done"|"row_skipped"|"error"|"preflight_abort", ...}.
         persist: when True and con is not None, each cell is written to the DB.
