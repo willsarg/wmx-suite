@@ -61,13 +61,48 @@ class TestKokoroDatabase(unittest.TestCase):
         self.assertIsNotNone(latest)
         self.assertEqual(latest["id"], run_id)
 
-    def test_connect_migration_idempotent(self):
-        """connect() must not raise when called on a DB that already has os_wired_gb."""
-        # First connect creates schema (including os_wired_gb via ALTER).
-        con1 = db.connect()
-        con1.close()
-        # Second connect: the guarded ALTER must silently skip.
+    def test_connect_migrates_old_db_missing_os_wired_column(self):
+        """connect() must add os_wired_gb to a pre-existing OLD-schema table, idempotently."""
+        # setUp() already ran connect() once (creating the new-schema table). Drop it and
+        # recreate kokoro_measurements WITHOUT os_wired_gb to truly simulate an OLD database.
+        raw = sqlite3.connect(self.db_path)
+        raw.executescript(
+            "DROP TABLE IF EXISTS kokoro_measurements;"
+            "CREATE TABLE kokoro_measurements ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,"
+            " text_length INTEGER NOT NULL, audio_duration REAL NOT NULL,"
+            " compute_time REAL NOT NULL, rtf REAL NOT NULL, cps REAL NOT NULL,"
+            " peak_gb REAL);"
+        )
+        raw.commit()
+        raw.close()
+
+        # Sanity: the column really is missing before migration.
+        pre = sqlite3.connect(self.db_path)
+        pre_cols = {row[1] for row in pre.execute("PRAGMA table_info(kokoro_measurements)")}
+        pre.close()
+        self.assertNotIn("os_wired_gb", pre_cols)
+
+        # connect() must add the missing column via migration.
+        con = db.connect()
+        cols = {row[1] for row in con.execute("PRAGMA table_info(kokoro_measurements)")}
+        self.assertIn("os_wired_gb", cols)
+
+        # Inserts (including os_wired_gb) must work after migration.
+        run_id = db.start_kokoro_run(con, "test-model", "af_heart", "0.20.0")
+        db.add_kokoro_measurement(con, run_id, 10, 1.5, 0.05, 0.033, 200.0, 1.2,
+                                  os_wired_gb=2.45)
+        rows = db.get_kokoro_measurements(con, run_id)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["os_wired_gb"], 2.45)
+
+        # A second connect must be a no-op (idempotent), no error.
         con2 = db.connect()
+        self.assertIsNotNone(con2)
+        cols2 = {row[1] for row in con2.execute("PRAGMA table_info(kokoro_measurements)")}
+        self.assertIn("os_wired_gb", cols2)
+
+        con.close()
         con2.close()
 
 

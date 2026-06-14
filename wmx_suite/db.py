@@ -210,11 +210,11 @@ def connect() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.executescript(SCHEMA)
-    # Additive column migration for DBs created before os_wired_gb existed.
-    try:
+    # Additive column migrations for benchmark tables created before a column existed.
+    # Check-then-add (not try/except) so genuine DB errors are not silently swallowed.
+    cols = {row[1] for row in con.execute("PRAGMA table_info(kokoro_measurements)")}
+    if "os_wired_gb" not in cols:
         con.execute("ALTER TABLE kokoro_measurements ADD COLUMN os_wired_gb REAL")
-    except sqlite3.OperationalError:
-        pass  # column already present
     return con
 
 
