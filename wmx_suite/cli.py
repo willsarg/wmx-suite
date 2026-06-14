@@ -308,7 +308,7 @@ def cmd_benchmark_kokoro(args):
 
     print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
 
-    table_header = "\n\n  Length (char) | Audio (s) | Compute (s) |   RTF   |   CPS   | Peak Mem (GB)\n  --------------+-----------+-------------+---------+---------+--------------"
+    table_header = "\n\n  Length (char) | Audio (s) | Compute (s) |   RTF   |   CPS   | Peak Mem (GB) | OS Wired (GB)\n  --------------+-----------+-------------+---------+---------+---------------+--------------"
     header_printed = False
     safeguard_triggered = False
     error_triggered = False
@@ -340,8 +340,10 @@ def cmd_benchmark_kokoro(args):
             rtf = data["rtf"]
             cps = data["cps"]
             peak_gb = data["peak_gb"]
+            os_wired = data.get("os_wired_gb")
 
-            print(f"  {length:<13} | {audio_dur:<9.2f} | {comp_time:<11.2f} | {rtf:<7.4f} | {cps:<7.1f} | {peak_gb:<12.2f}")
+            os_wired_str = f"{os_wired:<12.2f}" if os_wired is not None else f"{'—':<12}"
+            print(f"  {length:<13} | {audio_dur:<9.2f} | {comp_time:<11.2f} | {rtf:<7.4f} | {cps:<7.1f} | {peak_gb:<13.2f} | {os_wired_str}")
 
             db.add_kokoro_measurement(
                 con, run_id,
@@ -350,7 +352,8 @@ def cmd_benchmark_kokoro(args):
                 compute_time=comp_time,
                 rtf=rtf,
                 cps=cps,
-                peak_gb=peak_gb
+                peak_gb=peak_gb,
+                os_wired_gb=os_wired
             )
         elif status == "error":
             print(f"\n  ERROR: {data.get('note')}")

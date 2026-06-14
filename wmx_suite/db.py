@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS kokoro_measurements (
     rtf            REAL NOT NULL,
     cps            REAL NOT NULL,
     peak_gb        REAL,
+    os_wired_gb    REAL,
     FOREIGN KEY (run_id) REFERENCES kokoro_runs(id) ON DELETE CASCADE
 );
 
@@ -209,6 +210,11 @@ def connect() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.executescript(SCHEMA)
+    # Additive column migration for DBs created before os_wired_gb existed.
+    try:
+        con.execute("ALTER TABLE kokoro_measurements ADD COLUMN os_wired_gb REAL")
+    except sqlite3.OperationalError:
+        pass  # column already present
     return con
 
 
@@ -393,11 +399,12 @@ def add_kokoro_measurement(
     rtf: float,
     cps: float,
     peak_gb: float | None,
+    os_wired_gb: float | None = None,
 ) -> None:
     con.execute(
-        "INSERT INTO kokoro_measurements (run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb),
+        "INSERT INTO kokoro_measurements (run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb, os_wired_gb) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb, os_wired_gb),
     )
     con.commit()
 
@@ -411,7 +418,7 @@ def get_all_kokoro_runs(con: sqlite3.Connection) -> list[dict]:
 
 def get_kokoro_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
     rows = con.execute(
-        "SELECT id, run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb "
+        "SELECT id, run_id, text_length, audio_duration, compute_time, rtf, cps, peak_gb, os_wired_gb "
         "FROM kokoro_measurements WHERE run_id = ? ORDER BY text_length ASC",
         (run_id,),
     ).fetchall()

@@ -81,6 +81,7 @@
                     <th>Real-Time Factor (RTF)</th>
                     <th>Characters/Second (CPS)</th>
                     <th>Peak Memory (GB)</th>
+                    <th>OS Wired (GB)</th>
                 </tr>
             </thead>
             <tbody>
@@ -96,6 +97,13 @@
                         {{ "%.2f"|format(m.peak_gb) }} GB
                         {% else %}
                         n/a
+                        {% endif %}
+                    </td>
+                    <td style="color: var(--neon-purple); font-weight: 600;">
+                        {% if m.os_wired_gb is not none %}
+                        {{ "%.2f"|format(m.os_wired_gb) }} GB
+                        {% else %}
+                        —
                         {% endif %}
                     </td>
                 </tr>

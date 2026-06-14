@@ -28,9 +28,11 @@ class TestKokoroDatabase(unittest.TestCase):
         run_id = db.start_kokoro_run(self.conn, "test-model", "af_heart", "0.20.0")
         self.assertEqual(run_id, 1)
 
-        # 2. Add measurements
+        # 2. Add measurements: positional 8-arg call (legacy) — os_wired_gb must default to None
         db.add_kokoro_measurement(self.conn, run_id, 10, 1.5, 0.05, 0.033, 200.0, 1.2)
-        db.add_kokoro_measurement(self.conn, run_id, 50, 3.2, 0.12, 0.037, 416.6, 1.8)
+        # Keyword call with os_wired_gb
+        db.add_kokoro_measurement(self.conn, run_id, 50, 3.2, 0.12, 0.037, 416.6, 1.8,
+                                  os_wired_gb=2.45)
 
         # 3. Retrieve all runs
         runs = db.get_all_kokoro_runs(self.conn)
@@ -47,11 +49,26 @@ class TestKokoroDatabase(unittest.TestCase):
         self.assertEqual(measurements[0]["rtf"], 0.033)
         self.assertEqual(measurements[0]["cps"], 200.0)
         self.assertEqual(measurements[0]["peak_gb"], 1.2)
+        # Legacy positional call: os_wired_gb must be None
+        self.assertIsNone(measurements[0]["os_wired_gb"])
+
+        # Keyword call: os_wired_gb round-trips correctly
+        self.assertEqual(measurements[1]["peak_gb"], 1.8)
+        self.assertAlmostEqual(measurements[1]["os_wired_gb"], 2.45)
 
         # 5. Get latest run
         latest = db.get_latest_kokoro_run(self.conn)
         self.assertIsNotNone(latest)
         self.assertEqual(latest["id"], run_id)
+
+    def test_connect_migration_idempotent(self):
+        """connect() must not raise when called on a DB that already has os_wired_gb."""
+        # First connect creates schema (including os_wired_gb via ALTER).
+        con1 = db.connect()
+        con1.close()
+        # Second connect: the guarded ALTER must silently skip.
+        con2 = db.connect()
+        con2.close()
 
 
 class TestKokoroTextGeneration(unittest.TestCase):

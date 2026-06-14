@@ -128,6 +128,7 @@ def main() -> None:
         run_rtfs = []
         run_cpss = []
         run_peaks = []
+        run_oswired = []
 
         success = True
         for _ in range(max(1, args.repeats)):
@@ -154,6 +155,7 @@ def main() -> None:
             run_rtfs.append(compute / duration)
             run_cpss.append(len(text) / compute)
             run_peaks.append(mx.get_peak_memory() / 1e9)  # GB
+            run_oswired.append(wired_gb())
 
         if not success:
             continue
@@ -166,7 +168,8 @@ def main() -> None:
             "compute_time": round(statistics.median(run_computes), 3),
             "rtf": round(statistics.median(run_rtfs), 4),
             "cps": round(statistics.median(run_cpss), 2),
-            "peak_gb": round(statistics.median(run_peaks), 3)
+            "peak_gb": round(statistics.median(run_peaks), 3),
+            "os_wired_gb": round(statistics.median(run_oswired), 3)
         }), flush=True)
 
     tts.close()
