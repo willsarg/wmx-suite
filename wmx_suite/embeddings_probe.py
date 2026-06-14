@@ -50,9 +50,10 @@ def _det3(m: list[list[float]]) -> float:
 
 
 def _solve3(mat: list[list[float]], rhs: list[float]) -> tuple[float, float, float] | None:
-    """Solve a 3x3 linear system by Cramer's rule. Returns None if singular."""
+    """Solve a 3x3 linear system by Cramer's rule. Returns None if exactly singular.
+    (Relative ill-conditioning is screened by the caller, `_fit_cab`.)"""
     det = _det3(mat)
-    if abs(det) < 1e-30:
+    if det == 0.0:
         return None
     out = []
     for i in range(3):
@@ -87,6 +88,14 @@ def _fit_cab(points: list[tuple[float, float, float]]) -> tuple[float, float, fl
     mat = [[float(n), sx1, sx2],
            [sx1, sx11, sx12],
            [sx2, sx12, sx22]]
+    # Relative conditioning gate: the normal-matrix diagonal entries (n, Σx1², Σx2²) span
+    # many orders of magnitude (x2 = batch*seq^2 ~ 1e9), so a fixed epsilon is meaningless.
+    # Compare |det| to the product of the diagonals (which bounds it for this symmetric
+    # PSD matrix); a near-singular system falls far below it. None → caller uses the safe
+    # cold over-estimate.
+    ref = mat[0][0] * mat[1][1] * mat[2][2]
+    if ref <= 0.0 or abs(_det3(mat)) < 1e-12 * ref:
+        return None
     rhs = [sy, sx1y, sx2y]
     return _solve3(mat, rhs)
 

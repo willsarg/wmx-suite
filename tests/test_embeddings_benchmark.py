@@ -330,9 +330,23 @@ def test_fit_cab_recovers_known_coeffs_and_handles_singular():
 
     # < 3 points -> None
     assert ep._fit_cab([(128.0, 16384.0, 1.0), (256.0, 65536.0, 1.1)]) is None
-    # collinear (all identical feature rows) -> singular -> None
+    # all-identical (degenerate) feature rows -> singular -> None
     same = [(128.0, 16384.0, 1.0)] * 5
     assert ep._fit_cab(same) is None
+    # degenerate at LARGE scale (perfectly collinear x1/x2 columns) still -> None; this is
+    # the magnitude regime where a fixed tiny epsilon is meaningless and the relative
+    # threshold matters.
+    bigdegen = [(1e9, 1e18, 1.0), (2e9, 2e18, 2.0), (3e9, 3e18, 3.0)]
+    assert ep._fit_cab(bigdegen) is None
+
+
+def test_coeffs_falls_back_to_cold_overestimate(monkeypatch):
+    from wmx_suite import embeddings_probe as ep
+    # Below MIN_FIT_POINTS -> cold over-estimate (not the floor).
+    assert ep._coeffs([(128.0, 16384.0, 0.1)]) == (ep.A_COLD, ep.B_COLD)
+    # Enough points but a degenerate (singular) system -> still cold over-estimate.
+    degen = [(128.0, 16384.0, 1.0)] * ep.MIN_FIT_POINTS
+    assert ep._coeffs(degen) == (ep.A_COLD, ep.B_COLD)
 
 
 def test_profiles_embedding_coeffs_roundtrip(monkeypatch, tmp_path):
