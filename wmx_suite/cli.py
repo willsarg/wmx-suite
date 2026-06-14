@@ -26,6 +26,10 @@ from mlx_lm.utils import load_tokenizer
 
 from . import config, db, launcher, models, probe, profiles
 from .system import read_limits, sample_settled_baseline
+from .ui import Console
+
+# Default Console for the `run` fast path; main() replaces it per-invocation.
+CONSOLE = Console.from_args()
 
 
 def _configured_margin(value=None) -> float:
@@ -1192,9 +1196,25 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
         os.execvp("mlx_lm.generate", ["mlx_lm.generate"] + argv)
 
 
-def _main_argparse():
+def _build_global_parser() -> argparse.ArgumentParser:
+    """Parent parser providing the global --verbose/--no-color flags.
+
+    Passed as ``parents=[...]`` to every subcommand so the flags are accepted
+    after any command (e.g. ``wmx-suite system --verbose``).
+    """
+    g = argparse.ArgumentParser(add_help=False)
+    g.add_argument("--verbose", "-v", action="store_true",
+                   help="show the power-user appendix (raw numbers) on each command")
+    g.add_argument("--no-color", action="store_true",
+                   help="never emit ANSI color, even on a TTY")
+    return g
+
+
+def _main_argparse(argv=None):
+    gp = _build_global_parser()
     ap = argparse.ArgumentParser(prog="wmx-suite")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=lambda **kw:
+                            argparse.ArgumentParser(parents=[gp], **kw))
     sub.add_parser("system").set_defaults(func=cmd_system)
     p = sub.add_parser("health")
     p.add_argument("--margin", default=None,
@@ -1316,15 +1336,43 @@ def _main_argparse():
                    help="ignore any stored calibration profile (cold start); still re-fits")
     p.set_defaults(func=cmd_benchmark_embeddings)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    args.console = Console.from_args(
+        no_color=getattr(args, "no_color", False),
+        verbose=getattr(args, "verbose", False),
+    )
     args.func(args)
+
+
+def _strip_global_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
+    """Pull --verbose/-v/--no-color out of *argv* (for the `run` fast path).
+
+    `run` is intercepted before argparse so it can forward arbitrary flags to
+    mlx_lm.generate; the global UX flags must not leak into that passthrough.
+    Returns ``(remaining_argv, verbose, no_color)``.
+    """
+    remaining: list[str] = []
+    verbose = no_color = False
+    for a in argv:
+        if a in ("--verbose", "-v"):
+            verbose = True
+        elif a == "--no-color":
+            no_color = True
+        else:
+            remaining.append(a)
+    return remaining, verbose, no_color
 
 
 def main():
     argv = sys.argv[1:]
     if argv and argv[0] == "run":
-        return cmd_run_raw(argv[1:])
-    return _main_argparse()
+        run_args, verbose, no_color = _strip_global_flags(argv[1:])
+        # Build a Console with the same policy as argparse commands; stored on
+        # the module so run-path renderers (Phase 4) can pick it up.
+        global CONSOLE
+        CONSOLE = Console.from_args(no_color=no_color, verbose=verbose)
+        return cmd_run_raw(run_args)
+    return _main_argparse(argv)
 
 
 if __name__ == "__main__":
