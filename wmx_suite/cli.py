@@ -301,7 +301,6 @@ def cmd_benchmark_embeddings(args):
     run_id = db.start_embeddings_run(con, args.model, mlx_version)
 
     ignore_profile = getattr(args, "ignore_profile", False)
-    from . import profiles
     if not ignore_profile and profiles.embedding_coeffs(con, args.model, mlx_version):
         print("  calibration profile: loaded (seeding gate)")
     else:
