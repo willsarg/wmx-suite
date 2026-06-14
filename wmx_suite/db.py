@@ -197,6 +197,24 @@ CREATE TABLE IF NOT EXISTS system_profiles (
     calibrated_at     TEXT,
     PRIMARY KEY (device_name, total_ram_bytes, macos_major)
 );
+
+CREATE TABLE IF NOT EXISTS embeddings_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id    TEXT NOT NULL,
+    mlx_version TEXT,
+    created_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS embeddings_measurements (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id         INTEGER NOT NULL,
+    batch_size     INTEGER NOT NULL,
+    seq_len        INTEGER NOT NULL,
+    os_wired_gb    REAL,
+    peak_gb        REAL,
+    throughput_tps REAL,
+    latency_ms     REAL,
+    FOREIGN KEY (run_id) REFERENCES embeddings_runs(id) ON DELETE CASCADE
+);
 """
 
 
@@ -680,6 +698,58 @@ def get_latest_kokoro_baseline(con: sqlite3.Connection) -> dict | None:
         "SELECT m.id, m.run_id, m.baseline_gb, m.active_gb, m.overhead_gb "
         "FROM kokoro_baseline_measurements m JOIN kokoro_baseline_runs r ON m.run_id = r.id "
         "ORDER BY r.id DESC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# --- Embeddings (ModernBERT 2D batch x seq) ---
+def start_embeddings_run(con: sqlite3.Connection, model_id: str, mlx_version: str | None) -> int:
+    cur = con.execute(
+        "INSERT INTO embeddings_runs (model_id, mlx_version, created_at) VALUES (?, ?, ?)",
+        (model_id, mlx_version, _now()),
+    )
+    con.commit()
+    return cur.lastrowid
+
+
+def add_embeddings_measurement(
+    con: sqlite3.Connection,
+    run_id: int,
+    batch_size: int,
+    seq_len: int,
+    os_wired_gb: float,
+    peak_gb: float,
+    throughput_tps: float,
+    latency_ms: float,
+) -> None:
+    con.execute(
+        "INSERT INTO embeddings_measurements "
+        "(run_id, batch_size, seq_len, os_wired_gb, peak_gb, throughput_tps, latency_ms) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (run_id, batch_size, seq_len, os_wired_gb, peak_gb, throughput_tps, latency_ms),
+    )
+    con.commit()
+
+
+def get_all_embeddings_runs(con: sqlite3.Connection) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM embeddings_runs ORDER BY id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_embeddings_measurements(con: sqlite3.Connection, run_id: int) -> list[dict]:
+    rows = con.execute(
+        "SELECT id, run_id, batch_size, seq_len, os_wired_gb, peak_gb, throughput_tps, latency_ms "
+        "FROM embeddings_measurements WHERE run_id = ? ORDER BY batch_size ASC, seq_len ASC",
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_latest_embeddings_run(con: sqlite3.Connection) -> dict | None:
+    row = con.execute(
+        "SELECT id, model_id, mlx_version, created_at FROM embeddings_runs ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return dict(row) if row else None
 
