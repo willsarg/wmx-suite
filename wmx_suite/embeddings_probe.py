@@ -19,7 +19,7 @@ from .system import read_limits, sample_settled_baseline
 DEFAULT_BATCHES = [1, 2, 4, 8, 16, 32]
 DEFAULT_SEQS = [128, 256, 512, 1024, 2048, 4096, 8192]
 
-MIN_FIT_POINTS = 3
+MIN_FIT_POINTS = 4  # 3-param fit needs >0 DoF; 4th measured cell (1,1024) is trivially safe
 PRED_SAFETY = 1.25
 MODEL_BASE_SEED_GB = 1.0  # weight-residency seed so cold-start/pre-flight aren't zero
 CELL_TIMEOUT_S = 300  # kill a wedged cell subprocess rather than block the sweep forever
@@ -100,28 +100,21 @@ def _fit_cab(points: list[tuple[float, float, float]]) -> tuple[float, float, fl
     return _solve3(mat, rhs)
 
 
-def _coeffs(points: list[tuple[float, float, float]]) -> tuple[float, float]:
-    """Gate coefficients (a, b). Cold over-estimate before MIN_FIT_POINTS or when the fit
-    is singular (degenerate grid); otherwise the fit clamped to the one-layer physical
-    floor. The cold over-estimate — not the floor — is the safe fallback when we can't
-    trust a fit, so a degenerate grid never under-predicts."""
-    if len(points) < MIN_FIT_POINTS:
-        return A_COLD, B_COLD
-    fit = _fit_cab(points)
-    if fit is None:
-        return A_COLD, B_COLD
-    _c, a_fit, b_fit = fit
-    return max(A_FLOOR, a_fit), max(B_FLOOR, b_fit)
-
-
-def _estimate_model_base(points: list[tuple[float, float, float]], a: float, b: float) -> float:
-    """Conservative fixed-overhead (weights-resident) estimate: the largest per-cell
-    residual after removing the fitted compute terms, floored at the seed. Recomputed each
-    iteration so it tracks the true residency rather than being frozen at the first cell."""
-    est = MODEL_BASE_SEED_GB
-    for x1, x2, d in points:
-        est = max(est, d - (a * x1 + b * x2))
-    return est
+def _coeffs(points: list[tuple[float, float, float]],
+            stored: tuple[float, float, float] | None) -> tuple[float, float, float]:
+    """Raw gate coefficients (c, a, b), before floors/clamps. Priority:
+      1. in-run 3-param fit once we have >= MIN_FIT_POINTS points (ground truth for the
+         current machine state),
+      2. a stored calibration profile (seeds the early cells),
+      3. the cold sum-over-layers OVER-estimate (safe fallback when we can't trust a fit).
+    """
+    if len(points) >= MIN_FIT_POINTS:
+        fit = _fit_cab(points)
+        if fit is not None:
+            return fit
+    if stored is not None:
+        return stored
+    return (0.0, A_COLD, B_COLD)
 
 
 def _run_cell(py: str, model: str, batch: int, seq: int, repeats: int, margin: float) -> dict:
@@ -169,6 +162,7 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
 
     points: list[tuple[float, float, float]] = []  # (x1, x2, delta)
     model_base = MODEL_BASE_SEED_GB
+    stored = None  # set from the calibration profile in a later task
     smallest_unsafe_seq: float = float("inf")  # for monotonic pruning across batches
     n_measured = 0
     n_skipped = 0
@@ -192,10 +186,12 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
                 continue
 
             live_base = sample_settled_baseline()
-            a, b = _coeffs(points)
-            # Monotone non-decreasing: a later fit can lower the compute coefficients, so
-            # never let the weight-residency term shrink below what earlier cells revealed.
-            model_base = max(model_base, _estimate_model_base(points, a, b))
+            c, a, b = _coeffs(points, stored)
+            # model_base = fixed residency (fitted/stored intercept), clamped to the seed
+            # and monotonic non-decreasing so a later fit can't shrink it unsafely.
+            model_base = max(model_base, MODEL_BASE_SEED_GB, c)
+            a = max(A_FLOOR, a)
+            b = max(B_FLOOR, b)
             x1, x2 = batch * seq, batch * seq * seq
             predicted = live_base + model_base + PRED_SAFETY * (a * x1 + b * x2)
             if predicted >= threshold:

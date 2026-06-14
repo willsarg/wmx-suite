@@ -340,13 +340,15 @@ def test_fit_cab_recovers_known_coeffs_and_handles_singular():
     assert ep._fit_cab(bigdegen) is None
 
 
-def test_coeffs_falls_back_to_cold_overestimate(monkeypatch):
+def test_coeffs_falls_back_to_cold_overestimate():
     from wmx_suite import embeddings_probe as ep
-    # Below MIN_FIT_POINTS -> cold over-estimate (not the floor).
-    assert ep._coeffs([(128.0, 16384.0, 0.1)]) == (ep.A_COLD, ep.B_COLD)
-    # Enough points but a degenerate (singular) system -> still cold over-estimate.
+    # Below MIN_FIT_POINTS -> cold over-estimate with zero intercept.
+    assert ep._coeffs([(128.0, 16384.0, 0.1)], None) == (0.0, ep.A_COLD, ep.B_COLD)
+    # Degenerate (singular) even with enough points -> cold over-estimate.
     degen = [(128.0, 16384.0, 1.0)] * ep.MIN_FIT_POINTS
-    assert ep._coeffs(degen) == (ep.A_COLD, ep.B_COLD)
+    assert ep._coeffs(degen, None) == (0.0, ep.A_COLD, ep.B_COLD)
+    # A stored profile is used when there's no usable in-run fit yet.
+    assert ep._coeffs([(1.0, 1.0, 0.1)], (1.5, 2e-6, 3e-9)) == (1.5, 2e-6, 3e-9)
 
 
 def test_profiles_embedding_coeffs_roundtrip(monkeypatch, tmp_path):
@@ -365,3 +367,62 @@ def test_profiles_embedding_coeffs_roundtrip(monkeypatch, tmp_path):
     # different model or mlx version -> miss
     assert profiles.embedding_coeffs(con, "org/other", "0.31.2") is None
     assert profiles.embedding_coeffs(con, "org/m", "9.9.9") is None
+
+
+# Real Run-2 os_wired values (GB), keyed (batch, seq). Surface is flat (~2.7 baseline).
+_RUN2_OSWIRED = {
+    (1, 128): 2.72, (1, 256): 3.50, (1, 512): 3.35, (1, 1024): 3.63, (1, 2048): 4.07, (1, 4096): 4.26,
+    (2, 128): 3.29, (2, 256): 3.48, (2, 512): 3.63, (2, 1024): 4.23, (2, 2048): 4.10, (2, 4096): 4.47,
+    (4, 128): 3.50, (4, 256): 3.62, (4, 512): 4.11, (4, 1024): 4.18, (4, 2048): 4.33, (4, 4096): 4.49,
+    (8, 128): 3.61, (8, 256): 4.10, (8, 512): 4.18, (8, 1024): 4.29, (8, 2048): 4.20,
+    (16, 128): 4.11, (16, 256): 4.16, (16, 512): 4.26, (16, 1024): 4.04, (16, 2048): 4.79,
+    (32, 128): 4.17, (32, 256): 4.25, (32, 512): 3.99, (32, 1024): 4.50,
+}
+
+
+def test_intercept_gate_measures_previously_skipped_safe_cells(monkeypatch):
+    from wmx_suite import embeddings_probe as ep
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        ow = _RUN2_OSWIRED.get((batch, seq), 4.6)
+        return {"status": "rung_done", "batch": batch, "seq": seq,
+                "os_wired_gb": ow, "peak_gb": 1.0, "throughput_tps": 1.0, "latency_ms": 1.0}
+
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 2.71)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=2.71))
+    events = []
+    ep.sweep(con=None, run_id=1, model="m", repeats=1, margin_gb=2.0,
+             on_event=events.append, persist=False)
+    measured = {(e["batch"], e["seq"]) for e in events if e["event"] == "cell_done"}
+    skipped = {(e["batch"], e["seq"]) for e in events if e["event"] == "row_skipped"}
+    assert (8, 4096) in measured       # was wrongly skipped before the intercept fix
+    assert (32, 2048) in measured      # ditto
+    assert (32, 8192) not in measured  # true danger corner: still never measured
+    # (32, 8192) is implicitly protected: the row breaks at (32, 4096) which is predicted
+    # unsafe, so 8192 is never reached (no event emitted); the explicit skipped set covers
+    # earlier batches that hit 8192 via the monotonic-pruning path.
+    assert (32, 4096) in skipped       # the actual skip boundary for batch=32
+
+
+def test_model_base_clamped_to_seed_on_negative_intercept(monkeypatch):
+    from wmx_suite import embeddings_probe as ep
+    spawned = []
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        spawned.append((batch, seq))
+        return {"status": "rung_done", "batch": batch, "seq": seq,
+                "os_wired_gb": 2.8, "peak_gb": 1.0, "throughput_tps": 1.0, "latency_ms": 1.0}
+
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 2.71)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=2.71))
+    # stored coeffs with a NEGATIVE intercept; floors clamp slopes, seed clamps model_base
+    monkeypatch.setattr(ep, "_coeffs", lambda points, stored: (-5.0, 1e-9, 1e-12))
+    ep.sweep(con=None, run_id=1, model="m", batches=[1], seqs=[128], repeats=1,
+             margin_gb=2.0, on_event=lambda e: None, persist=False)
+    assert spawned == [(1, 128)]  # didn't crash on negative c, didn't falsely abort
