@@ -18,10 +18,12 @@ a non-causal model.
 
 ## 2. Runtime & dependency
 
-- **Library:** `mlx-embeddings==0.1.0` (Blaizzy/mlx-embeddings). Native ModernBERT support,
-  pure-MLX inference (no torch). Pulls `transformers>=5.0` and `mlx-vlm>=0.4.0` as
-  transitive deps — accepted as the cost of a **core dependency** (added to
-  `pyproject.toml [project] dependencies` alongside `kokoro-mlx`).
+- **Library:** `mlx-embeddings>=0.1.0` (Blaizzy/mlx-embeddings; floor pin to match the
+  repo's `>=` convention). Native ModernBERT support, pure-MLX inference (no torch). Pulls
+  `transformers>=5.0` and `mlx-vlm>=0.4.0` as transitive deps — accepted as the cost of a
+  **core dependency** (added to `pyproject.toml [project] dependencies` alongside
+  `kokoro-mlx`). Verify `uv sync` resolves cleanly against existing pins (`mlx-lm>=0.31`,
+  `mlx 0.31.2`) after adding.
 - **Default model:** `mlx-community/nomicai-modernbert-embed-base-bf16` — an actual
   embedding model (`feature-extraction`), bf16 (matches the "measure at production
   settings" rule), the most-downloaded ModernBERT in `mlx-community`.
@@ -64,40 +66,61 @@ Measures a **single** `(batch, seq)` cell and prints exactly one terminal JSON l
 **Args:** `--model`, `--batch` (int), `--seq` (int), `--repeats` (int, default 3),
 `--margin` (float).
 
+**Import convention (required for testability):** the worker does
+`import mlx.core as mx`, `import mlx_embeddings`, and `from . import system` at module
+top — NOT `from mlx_embeddings import load` / `from .system import wired_gb`. Tests then
+patch `mlx_embeddings.load`, `mx.*`, and `system.wired_gb`/`system.read_limits` on those
+module objects, which are shared with the worker. (A `from x import y` binding would dodge
+the patch.) The `mlx_embeddings` import is wrapped so `ImportError` is reportable.
+
 **Flow:**
-1. **Pre-flight gate (defense in depth):** `limits = read_limits()`;
-   `threshold = limits.safe_threshold_gb(margin)`; if `limits.wired_now_gb >= threshold`,
-   print `{"status":"error","note":"Pre-flight aborted: ..."}` and `sys.exit(0)`. The
-   model is **never loaded** in this branch.
+1. **Pre-flight gate (defense in depth):** `limits = system.read_limits()`;
+   `threshold = limits.safe_threshold_gb(margin)`; abort (print
+   `{"status":"error","note":"Pre-flight aborted: ..."}`, `sys.exit(0)`, model **never
+   loaded**) if `limits.wired_now_gb + MODEL_WEIGHT_EST_GB >= threshold`. The
+   `MODEL_WEIGHT_EST_GB` headroom term (a small constant, e.g. 0.6 GB, covering a
+   ModernBERT-base bf16 weight load) ensures the worker never loads weights it can't
+   afford even if the orchestrator gate were wrong. This is the kernel-panic backstop:
+   subprocess isolation prevents *residue accumulation* but does NOT prevent a single
+   child's allocation from panicking the host, so both gates must hold.
 2. **Load** model+tokenizer via `mlx_embeddings.load(args.model)`. On `ImportError`, print
-   `{"status":"error","note":"... pip install '.[...]' / mlx-embeddings ..."}` and exit 1.
+   `{"status":"error","note":"... add mlx-embeddings ..."}` and `sys.exit(1)`.
    (Tokenizer is loaded but unused — synthetic inputs are built directly.)
 3. **Build synthetic input** of exact shape:
-   `input_ids = mx.zeros((batch, seq), dtype=mx.int32)`,
-   `attention_mask = mx.ones((batch, seq), dtype=<model embed dtype, bf16>)`.
-4. **Warmup:** one forward pass `model(input_ids, attention_mask=attention_mask)`, then
-   `mx.eval(...)` the output and `mx.clear_cache()`. (No JSON emitted for warmup at the
-   cell level; warmup status is an orchestrator concern.)
-5. **Measure `repeats` times:** for each repeat — `mx.clear_cache()`,
-   `mx.reset_peak_memory()`, time the forward pass (`mx.eval` to force completion),
-   record `compute_time`, `mx.get_peak_memory()/1e9` as `peak_gb`, and `wired_gb()` as
-   `os_wired_gb`. Use the **median** across repeats for each metric.
-6. **Emit** one line:
+   `input_ids = mx.zeros((batch, seq), dtype=mx.int32)` (id 0 is in-vocab),
+   `attention_mask = mx.ones((batch, seq), dtype=embed_dtype)` where
+   `embed_dtype = model.model.embeddings.tok_embeddings.weight.dtype` (bf16 for the
+   default model). Passing `attention_mask=None` is equivalent (the model builds the same
+   all-ones mask); we pass it explicitly for clarity.
+4. **Background OS-wired sampler (the safety-critical correction):** before the timed work,
+   start a daemon thread that records `max(system.wired_gb())` every ~50 ms (identical to
+   the LLM `probe_worker.py` sampler). MLX may free per-layer attention buffers mid-forward,
+   so a single post-eval read can miss the true high-water — and the fit that gates *larger*
+   cells is built from these readings, so an undercount propagates into an under-prediction.
+   The sampler's high-water is the authoritative `os_wired_gb`.
+5. **Warmup:** one forward pass `model(input_ids, attention_mask=attention_mask)`, then
+   `mx.eval(output.last_hidden_state)` (NOT `mx.eval(output)` — the return is a
+   `BaseModelOutput` dataclass; eval the array field to force the graph) and
+   `mx.clear_cache()`.
+6. **Measure `repeats` times:** for each repeat — `mx.clear_cache()`,
+   `mx.reset_peak_memory()`, `t0=perf_counter()`, forward, `mx.eval(output.last_hidden_state)`,
+   record `compute_time`, and `mx.get_peak_memory()/1e9`. Stop the sampler after the last
+   repeat.
+7. **Aggregate (conservative for memory, central for timing):**
+   - `os_wired_gb` = the sampler's high-water **max** over the whole measurement window.
+   - `peak_gb` = **max** of `mx.get_peak_memory()/1e9` across repeats.
+   - `compute_time` = **median** across repeats; `throughput_tps = batch*seq/compute_time`;
+     `latency_ms = compute_time*1000`.
+   Max (not median) for the memory metrics keeps the gate-feeding data on the safe side.
+8. **Emit** one line:
    ```json
    {"status":"rung_done","batch":<int>,"seq":<int>,
     "os_wired_gb":<f>,"peak_gb":<f>,"compute_time":<f>,
     "throughput_tps":<f>,"latency_ms":<f>}
    ```
-   where `throughput_tps = batch*seq/compute_time`, `latency_ms = compute_time*1000`.
 
 **Status vocabulary:** `rung_done`, `error`. (No `safeguard_triggered`/`row_skipped` in the
 worker — the predictive skip is the orchestrator's job, since it owns the cross-cell view.)
-
-**Memory measurement note:** like the Kokoro workers, `os_wired_gb` is read once after the
-forward completes. The forward is a single synchronous op (no incremental decode), so a
-post-eval read captures the settled high-water for that cell; the orchestrator's
-between-cell settled baseline plus the conservative predictive gate provide the safety
-margin against transient spikes.
 
 ## 5. The orchestrator — `wmx_suite/embeddings_probe.py` (NEW)
 
@@ -105,66 +128,88 @@ Analog of `probe.py`. Owns the per-row ramp, the predictive-skip safety gate, th
 incremental fit, and DB persistence. Hardware-free-testable (subprocess spawn is injected /
 mockable).
 
-**Entry point (shape mirrors probe.py conventions):**
+**Entry point:**
 ```python
-def sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None, *, log=_default_log) -> dict
+def sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None, *, on_event=None) -> dict
 ```
 - `run_id` is created by the CLI via `db.start_embeddings_run` and passed in; the
-  orchestrator persists each cell's measurement under it.
+  orchestrator persists each cell's measurement under it. (The orchestrator does NOT call
+  `db.connect()` — the CLI owns the connection, unlike `probe.characterize`.)
 - `batches` default `[1, 2, 4, 8, 16, 32]`; `seqs` default
   `[128, 256, 512, 1024, 2048, 4096, 8192]` (both overridable from the CLI).
-- Returns a summary dict (model, n_cells_measured, n_cells_skipped, run_id).
+- **`on_event` callback (a new convention this spec introduces — probe.py uses an internal
+  `verbose` closure, not an injected callback).** Called once per orchestrator event with a
+  dict: `{"event": "cell_done", "batch", "seq", "os_wired_gb", "peak_gb",
+  "throughput_tps", "latency_ms"}`, `{"event": "row_skipped", "batch", "seq",
+  "predicted_gb"}`, or `{"event": "preflight_abort", "note"}`. The CLI passes a callback
+  that renders the grid table; tests pass a collector. Defaults to a no-op.
+- Returns a summary dict (`model`, `n_cells_measured`, `n_cells_skipped`, `run_id`).
 
-**Memory model (encoder-specific analytic prior + incremental fit):**
+**Memory model — real-fit-governed gate, analytic prior for cold start only.**
 
-Predicted absolute OS-wired peak for a cell:
+This mirrors `probe.py`: the gate trusts a fit built from **real measured high-water peaks**
+(from the worker's background sampler), extrapolated **one rung at a time** with a safety
+factor; the analytic prior only seeds the gate before enough real data exists. (An earlier
+draft used `max(analytic, fitted)` permanently — rejected, because the conservative
+all-layers-global prior predicts ~35 GB at seq 8192 and would *permanently* skip the entire
+high-seq region even where real memory is safe, defeating the benchmark.)
+
+Predicted absolute OS-wired peak for a candidate cell:
 ```
 predicted = live_base + model_base + a*(batch*seq) + b*(batch*seq^2)
 ```
-- `live_base` = `sample_settled_baseline()` sampled fresh **between cells** (after the
-  previous subprocess exits).
-- `model_base` = weights-resident floor; seeded from a conservative constant prior and
-  replaced by the measured smallest-cell delta once available.
-- `a` (linear term) absorbs residual-stream + FFN + local-attention activations.
-- `b` (quadratic term) is the global-attention `seq²` cost.
+- `live_base` = `system.sample_settled_baseline()` sampled fresh **between cells** (after the
+  previous subprocess exits and the IOGPU floor settles).
+- `model_base` = weights-resident floor. **Seeded non-zero** from a weight-size estimate
+  (mirroring `probe.estimate_base_gb`: `weights_bytes * RESIDENT_FACTOR + overhead`) so the
+  cold-start gate and the pre-flight account for the cost of *loading* the model — never 0.
+  Replaced by the measured smallest-cell delta once available.
+- `a`, `b` = linear and quadratic (`seq²`) coefficients.
 
-**Analytic priors (conservative = over-estimate, the safe direction for a never-crash
-gate):**
-- `b_analytic` treats **all 22 layers as global** (true count is 8) — a ~2.75× over-estimate
-  of the `seq²` term:
-  `b_analytic = num_layers * num_heads * 2 bytes / 1e9` GB per `(batch*seq^2)` unit
-  (= 22 * 12 * 2 / 1e9). Plus the residual-stream term in `a_analytic`.
-- These priors are used **only** until ≥2 real cells exist to fit against; the first cells
-  ramped (small batch, small seq) are trivially safe.
-
-**Fit:** least-squares fit of `delta = os_wired_gb - cell_baseline` against features
-`(batch*seq, batch*seq^2)` across all measured cells → refined `(a, b)`; `model_base`
-from the smallest measured cell. The **gate uses `max(analytic, fitted)`** for each term so
-a lagging fit can never under-predict.
+**Gate logic:**
+- **Cold start** (`< MIN_FIT_POINTS`, e.g. 3, measured cells): use conservative analytic
+  coefficients
+  `a_analytic = num_layers * hidden_size * 2 / 1e9` (= 22*768*2/1e9 ≈ 3.38e-5 GB per
+  `batch*seq` unit) and
+  `b_analytic = num_layers * num_heads * 2 / 1e9` (= 22*12*2/1e9, all-22-layers-global —
+  conservative). These only ever gate the first few small cells, which pass anyway.
+- **Fitted** (`>= MIN_FIT_POINTS`): least-squares fit of
+  `delta = os_wired_gb - cell_baseline` on features `(batch*seq, batch*seq^2)` across all
+  measured cells → `(a_fit, b_fit)`. Use
+  `a = max(a_analytic, max(0.0, a_fit))`, `b = max(b_analytic, max(0.0, b_fit))` — the
+  analytic floor + the `max(0,·)` clamp prevent a noisy/negative fitted coefficient from
+  *lowering* the prediction below the physical floor. Predictions carry a safety factor
+  `PRED_SAFETY = 1.25` applied to the model terms, on top of the always-present
+  `wall − margin` threshold.
+- Each prediction extrapolates only to the **next** rung from all prior data (seqs double,
+  so the `seq²` term quadruples per step); the row stops at the first predicted breach, so
+  we never extrapolate far. Residual risk (a regime change between the last safe rung and
+  the skipped one) is bounded by `PRED_SAFETY` + the 2 GB margin — the same accepted risk
+  model as `probe.characterize`.
 
 **Traversal — per-row ramp + predictive skip (the approved strategy):**
 ```
+preflight: live = sample_settled_baseline()
+           if live + model_base(seed) >= threshold: emit preflight_abort; return
 for batch in batches (ascending):
     for seq in seqs (ascending):
+        if (batch, seq) known-unsafe by monotonic pruning: emit row_skipped; continue/break
         live_base = sample_settled_baseline()
-        predicted = live_base + model_base + max-of(analytic,fitted) terms
+        predicted = live_base + model_base + PRED_SAFETY*(a*batch*seq + b*batch*seq^2)
         if predicted >= threshold:
-            log+emit row_skipped(batch, seq, predicted); break   # skip rest of row
-        result = run_cell_subprocess(model, batch, seq, repeats, margin)
-        if result.status == "error": handle (abort or skip per note below)
-        else: persist measurement; update fit
+            emit row_skipped(batch, seq, predicted); record smallest-unsafe-seq[batch]; break
+        result = run_cell_subprocess(model, batch, seq, repeats, margin)   # parent gates BEFORE spawn
+        if result.status == "error": emit + abort sweep (exit nonzero)
+        else: persist measurement; emit cell_done; refit
 ```
-- **Skip semantics:** when a cell is predicted to breach, the *rest of that row* (larger
-  seqs) is skipped and we continue with the next (larger) batch — whose smaller seqs may
-  still be safe and worth measuring. Memory is monotonically increasing in batch at fixed
-  seq, so once `(batch, seq*)` is unsafe, `(batch', seq*)` for `batch' > batch` is also
-  unsafe. Optimization: track the
-  smallest unsafe seq seen and prune known-unsafe cells in later rows without spawning.
-  (Safety is unaffected; this only avoids wasted safe-but-pointless work. Implementation
-  may start simple — gate every cell — and add pruning if useful.)
-- **Pre-flight at orchestrator start:** if the very first cell is already predicted unsafe
-  (host pressure too high), abort the whole sweep with a clear message, like
-  `probe.characterize`'s pre-flight.
+- **Skip semantics:** when a cell is predicted to breach, the rest of that row (larger seqs)
+  is skipped; continue with the next batch. Memory is monotonic in batch at fixed seq
+  (dense attention makes `batch*seq²` an exact factorization here), so once `(batch, seq*)`
+  is unsafe, `(batch', seq*)` for `batch' > batch` is too — track the smallest unsafe seq
+  per batch and prune those cells in later rows without spawning. Pruning only avoids wasted
+  work; safety comes from the per-cell gate.
+- **The gate runs in the PARENT (orchestrator) before any subprocess is spawned** — this is
+  the primary safety line. The worker's own pre-flight (Section 4.1) is the backstop.
 
 **Cell subprocess invocation:** `[sys.executable, "-m",
 "wmx_suite.probe_worker_embeddings", "--model", m, "--batch", b, "--seq", s, "--repeats",
@@ -214,10 +259,11 @@ migration is only for columns added to pre-existing tables.
   `--repeats` (default 3), `--margin` (default None → `_configured_margin`).
 - `cmd_benchmark_embeddings`: resolve margin; `mlx_version = mx.__version__`;
   `run_id = db.start_embeddings_run(con, args.model, mlx_version)`; call
-  `embeddings_probe.sweep(con, run_id, ...)` with a `log` callback that renders a **grid
-  table** (rows = batch, columns = seq; each cell shows `os_wired_gb` / `throughput_tps`;
-  predicted-skipped cells marked e.g. `SKIP`; not-reached cells blank). On orchestrator
-  error/abort, print the message and `sys.exit(1)`.
+  `embeddings_probe.sweep(con, run_id, ..., on_event=render)` where `render` consumes the
+  event dicts (Section 5) to print a **grid table** (rows = batch, columns = seq; each cell
+  shows `os_wired_gb` / `throughput_tps`; `row_skipped` cells marked `SKIP`; not-reached
+  cells blank). On `preflight_abort` or a worker error event, print the note and
+  `sys.exit(1)`.
 
 ## 8. Web — `wmx_suite/web/`
 
@@ -234,26 +280,45 @@ migration is only for columns added to pre-existing tables.
 All tests avoid real model loads, live memory probing, and the production DB
 (`monkeypatch.setattr(db, "DB_PATH", tmp_path/"suite.db")`).
 
+**Patch-target rule (important):** because the worker imports modules (`import
+mlx_embeddings`, `import mlx.core as mx`, `from . import system`), patch attributes **on
+those shared module objects**, NOT on locally-bound names:
+- `monkeypatch.setattr(mlx_embeddings, "load", fake_load)`
+- `monkeypatch.setattr(mx, "get_peak_memory", ...)` (and `reset_peak_memory`,
+  `clear_cache`) — `mx is mlx.core`, so this is visible to the worker.
+- `monkeypatch.setattr(system, "wired_gb", ...)`, `setattr(system, "read_limits", ...)`,
+  `setattr(system, "sample_settled_baseline", ...)`.
+A `from mlx_embeddings import load` style in the worker would make `load` un-patchable —
+the worker MUST keep module-level imports (Section 4).
+
 1. **DB lifecycle:** `start_embeddings_run` / `add_embeddings_measurement` /
    `get_all_embeddings_runs` / `get_embeddings_measurements` / `get_latest_embeddings_run`
    round-trip, including FK cascade delete.
-2. **Worker — happy path:** patch `mlx_embeddings.load` (returns mock model+tokenizer),
-   `mlx.core.get_peak_memory`/`reset_peak_memory`/`clear_cache`, `wmx_suite.system.wired_gb`
-   and `read_limits`; run `probe_worker_embeddings.main()` with patched argv; assert the
-   `rung_done` JSON has correct fields and `throughput_tps`/`latency_ms` math.
+2. **Worker — happy path:** patch as above; `fake_load` returns a mock model whose
+   `__call__` returns an object with a `.last_hidden_state` mx.array and whose
+   `model.embeddings.tok_embeddings.weight.dtype` is set; run
+   `probe_worker_embeddings.main()` with patched argv; assert the `rung_done` JSON fields
+   and `throughput_tps`/`latency_ms` math, and that `os_wired_gb`/`peak_gb` are the **max**
+   (not median) of the patched readings.
 3. **Worker — pre-flight refusal (RULE #1 guard):** patch `read_limits` so
-   `wired_now_gb >= safe_threshold_gb()`; run `main()`; assert `mlx_embeddings.load` was
-   **never called** and an `error` line was emitted with exit 0. (This test does not exist
-   for Kokoro — written fresh here.)
+   `wired_now_gb + MODEL_WEIGHT_EST_GB >= safe_threshold_gb()`; run `main()`; assert
+   `mlx_embeddings.load` was **never called**, an `error` line was emitted, exit 0.
+   Mutation check: removing the `+ MODEL_WEIGHT_EST_GB` headroom must not make a
+   marginal-pressure case wrongly pass (include a case that is safe without the term but
+   unsafe with it, asserting the abort).
 4. **Orchestrator — predictive skip (RULE #1 guard):** inject a fake cell-runner; feed
-   measured points that make the fit predict the next cell `>= threshold`; assert the
-   cell-runner is **not invoked** for the predicted-unsafe cell, a `row_skipped` event is
-   emitted, and the sweep advances to the next batch. Mutation check during implementation:
-   removing the gate must make this test fail.
-5. **Orchestrator — monotonic pruning:** once `(batch, seq*)` is unsafe, assert
+   measured points (≥ MIN_FIT_POINTS) that make the fit predict the next cell `>= threshold`;
+   assert the cell-runner is **not invoked** for the predicted-unsafe cell, a `row_skipped`
+   event fires, and the sweep advances to the next batch. Mutation check: removing the gate
+   must make this test fail.
+5. **Orchestrator — cold-start gate uses non-zero model_base:** with zero measured cells and
+   a high `live_base`, assert the first cell is gated using the non-zero weight seed (a
+   `model_base=0` implementation would wrongly spawn it). Guards blocker #1.
+6. **Orchestrator — monotonic pruning:** once `(batch, seq*)` is unsafe, assert
    `(batch', seq*)` with `batch' > batch` is not spawned.
-6. **CLI — parse → DB:** drive `cmd_benchmark_embeddings` with the orchestrator/subprocess
-   mocked to emit canned events; assert grid table prints and measurements land in the DB.
+7. **CLI — parse → DB:** drive `cmd_benchmark_embeddings` with the orchestrator mocked to
+   emit canned `cell_done`/`row_skipped` events; assert the grid table prints and
+   measurements land in the DB.
 
 Run `uv run pytest -q` and `uv run python -m compileall -q wmx_suite tests` before
 claiming completion.
@@ -269,11 +334,25 @@ claiming completion.
 
 ## 11. Key risks resolved
 
-- mlx-embeddings API + direct `(batch, seq)` control — **verified against installed
-  source** (`model(input_ids, attention_mask=...)`).
-- Subprocess isolation — **corrected** to per-cell (LLM-probe pattern), not single-process
-  (Kokoro pattern).
-- Encoder memory model — dense `batch×seq²` confirmed from source; conservative
-  all-layers-global prior is a safe over-estimate; incremental fit refines it.
-- Non-causal models bypass `is_causal`/`characterize` — handled by a dedicated worker +
-  orchestrator that never touch the causal path.
+Verified by two rounds of independent sub-agent audits (assumptions, then this document):
+
+- **mlx-embeddings API + direct `(batch, seq)` control** — verified against installed
+  source: `model(input_ids, attention_mask=...)`, `mx.eval(output.last_hidden_state)`,
+  embed dtype via `model.model.embeddings.tok_embeddings.weight.dtype`.
+- **Subprocess isolation** — corrected to per-cell (LLM-probe pattern), not single-process
+  (Kokoro). Isolation prevents residue accumulation but NOT a single child's kernel panic,
+  so the parent gate is primary and the worker pre-flight is the backstop.
+- **`model_base` cold-start prior** — made **non-zero** (weight-size estimate), used from
+  cell 0 and in pre-flight, so the gate accounts for model-load cost. (Audit blocker #1.)
+- **Transient-peak measurement** — worker uses a 50 ms **background OS-wired sampler**
+  (high-water), not a single post-eval read, so the gate-feeding fit isn't built on
+  undercounted data. Memory metrics aggregated as **max** across repeats. (Audit blocker.)
+- **Gate governance** — fit from real measured peaks governs (extrapolated one rung at a
+  time × `PRED_SAFETY`); the conservative analytic prior is **cold-start only**, with an
+  `a/b = max(analytic, max(0,fit))` clamp. Avoids the self-defeating permanent
+  `max(analytic,fitted)` that would skip the whole high-seq region. (Audit blocker #3.)
+- **Encoder memory model** — dense `batch×seq²` confirmed from source (no unpadding/flash).
+- **Non-causal models** bypass `is_causal`/`characterize` — dedicated worker + orchestrator
+  never touch the causal path.
+- **Test patch targets** — module-level imports + patch on shared module objects, so mocks
+  actually intercept (`from x import y` style explicitly forbidden in the worker).
