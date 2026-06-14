@@ -225,3 +225,36 @@ def test_monotonic_pruning_skips_larger_batch_same_seq(monkeypatch):
     # strong quadratic signal; and (1, 8192) being unsafe implies (32, 8192) is too.
     assert (32, 8192) not in spawned
     assert (1, 8192) not in spawned
+
+
+def test_cmd_benchmark_embeddings_persists_and_renders(monkeypatch, tmp_path, capsys):
+    from wmx_suite import cli, db, embeddings_probe
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+
+    def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None,
+                   *, on_event=None, persist=True):
+        for (bsz, seq) in [(1, 128), (2, 256)]:
+            db.add_embeddings_measurement(con, run_id, batch_size=bsz, seq_len=seq,
+                                          os_wired_gb=4.0, peak_gb=2.0,
+                                          throughput_tps=100.0, latency_ms=5.0)
+            on_event({"event": "cell_done", "batch": bsz, "seq": seq,
+                      "os_wired_gb": 4.0, "peak_gb": 2.0,
+                      "throughput_tps": 100.0, "latency_ms": 5.0})
+        on_event({"event": "row_skipped", "batch": 2, "seq": 8192, "predicted_gb": 99.0})
+        return {"model": model, "run_id": run_id, "n_cells_measured": 2, "n_cells_skipped": 1}
+
+    monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
+
+    args = SimpleNamespace(model="mlx-community/test", batches="1,2", seqs="128,256,8192",
+                           repeats=1, margin=None)
+    cli.cmd_benchmark_embeddings(args)
+
+    out = capsys.readouterr().out
+    assert "SKIP" in out
+
+    con = db.connect()
+    latest = db.get_latest_embeddings_run(con)
+    assert latest is not None
+    rows = db.get_embeddings_measurements(con, latest["id"])
+    assert len(rows) == 2

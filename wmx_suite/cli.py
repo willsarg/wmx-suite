@@ -276,6 +276,65 @@ def cmd_web(args):
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 
+def cmd_benchmark_embeddings(args):
+    """Run the ModernBERT embeddings 2D (batch x seq) memory-surface sweep and log it."""
+    from . import embeddings_probe
+
+    margin_val = _configured_margin(args.margin)
+    batches = [int(x) for x in str(args.batches).split(",") if x.strip()]
+    seqs = [int(x) for x in str(args.seqs).split(",") if x.strip()]
+
+    print("============================================================")
+    print(" ModernBERT Embeddings Memory Benchmark (batch x seq)")
+    print("============================================================")
+    print(f"  Model   : {args.model}")
+    print(f"  Batches : {batches}")
+    print(f"  Seqs    : {seqs}")
+    print(f"  Repeats : {args.repeats}")
+    print(f"  Margin  : {margin_val} GB")
+    print("------------------------------------------------------------")
+
+    import mlx.core as mx
+    mlx_version = mx.__version__
+
+    con = db.connect()
+    run_id = db.start_embeddings_run(con, args.model, mlx_version)
+
+    aborted = {"flag": False}
+
+    def render(event):
+        ev = event.get("event")
+        if ev == "preflight_abort":
+            print(f"  PRE-FLIGHT ABORT: {event['note']}")
+            aborted["flag"] = True
+        elif ev == "error":
+            print(f"  ERROR at batch {event.get('batch')} seq {event.get('seq')}: "
+                  f"{event.get('note')}")
+            aborted["flag"] = True
+        elif ev == "row_skipped":
+            pred = event.get("predicted_gb")
+            pred_s = f"{pred:.2f} GB" if pred is not None else "pruned"
+            print(f"  SKIP  batch={event['batch']:<3} seq={event['seq']:<6} "
+                  f"(predicted {pred_s})")
+        elif ev == "cell_done":
+            print(f"  OK    batch={event['batch']:<3} seq={event['seq']:<6} "
+                  f"wired={event['os_wired_gb']:.2f}GB  peak={event['peak_gb']:.2f}GB  "
+                  f"{event['throughput_tps']:.0f} tok/s  {event['latency_ms']:.1f}ms")
+
+    summary = embeddings_probe.sweep(
+        con, run_id, args.model, batches=batches, seqs=seqs,
+        repeats=args.repeats, margin_gb=margin_val, on_event=render,
+    )
+
+    if aborted["flag"]:
+        sys.exit(1)
+
+    print("============================================================")
+    print(f"  Done. Measured {summary['n_cells_measured']} cells, "
+          f"skipped {summary['n_cells_skipped']}. Saved as Run ID: {run_id}")
+    print("============================================================")
+
+
 def cmd_benchmark_kokoro(args):
     """Run Kokoro TTS performance sweep and log to database."""
     import json
@@ -1227,6 +1286,20 @@ def _main_argparse():
     p.add_argument("--margin", default=None,
                    help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
     p.set_defaults(func=cmd_benchmark_kokoro_baseline)
+
+    p = sub.add_parser("benchmark-embeddings",
+                       help="Benchmark ModernBERT embeddings batch x seq memory scaling")
+    p.add_argument("--model", default="mlx-community/nomicai-modernbert-embed-base-bf16",
+                   help="HuggingFace model ID or path")
+    p.add_argument("--batches", default="1,2,4,8,16,32",
+                   help="Comma-separated batch sizes to sweep")
+    p.add_argument("--seqs", default="128,256,512,1024,2048,4096,8192",
+                   help="Comma-separated sequence lengths to sweep")
+    p.add_argument("--repeats", type=int, default=3,
+                   help="Forward passes per cell (median timing, max memory)")
+    p.add_argument("--margin", default=None,
+                   help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.set_defaults(func=cmd_benchmark_embeddings)
 
     args = ap.parse_args()
     args.func(args)
