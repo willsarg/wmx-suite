@@ -171,13 +171,13 @@ class TestLauncherSafetyIntegration(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             cli._run(["--model", "test-causal"], margin=2.0, force=False, dry_run=True, co_run_kokoro=False)
         self.assertEqual(cm.exception.code, 2)
-        mock_plan.assert_called_with("test-causal", margin_gb=2.0)
+        mock_plan.assert_called_with("mlx-community/test-causal", margin_gb=2.0)
 
         # 2. With co-run-kokoro but no DB record, it adds 0.85 GB fallback overhead
         with self.assertRaises(SystemExit) as cm:
             cli._run(["--model", "test-causal"], margin=2.0, force=False, dry_run=True, co_run_kokoro=True)
         self.assertEqual(cm.exception.code, 2)
-        mock_plan.assert_called_with("test-causal", margin_gb=2.85)
+        mock_plan.assert_called_with("mlx-community/test-causal", margin_gb=2.85)
 
         # 3. Record a database baseline measurement of 0.65 GB overhead
         run_id = db.start_kokoro_baseline_run(self.conn, "mlx-community/Kokoro-82M-bf16", "0.20.0")
@@ -187,5 +187,5 @@ class TestLauncherSafetyIntegration(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             cli._run(["--model", "test-causal"], margin=2.0, force=False, dry_run=True, co_run_kokoro=True)
         self.assertEqual(cm.exception.code, 2)
-        mock_plan.assert_called_with("test-causal", margin_gb=2.65)
+        mock_plan.assert_called_with("mlx-community/test-causal", margin_gb=2.65)
 

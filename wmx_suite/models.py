@@ -186,3 +186,20 @@ def scan_cache() -> list[str]:
         org, _, rest = base.partition("--")
         out.append(f"{org}/{rest}")
     return sorted(set(out))
+
+
+def resolve_hf_id(name: str) -> str:
+    """Resolve a possibly-short model name to a full ``org/name`` HF id.
+
+    A name containing ``/`` is returned unchanged. A bare name (e.g.
+    ``gemma-4-e4b-it-4bit``) is matched against the local cache by its final
+    path segment; a unique cache hit wins. With no cache match the org defaults
+    to ``mlx-community`` (the suite's convention), so a freshly-downloaded
+    ``gemma-4-e4b-it-4bit`` still resolves to ``mlx-community/gemma-4-e4b-it-4bit``.
+    """
+    if "/" in name:
+        return name
+    matches = [c for c in scan_cache() if c.split("/", 1)[1] == name]
+    if len(matches) == 1:
+        return matches[0]
+    return f"mlx-community/{name}"

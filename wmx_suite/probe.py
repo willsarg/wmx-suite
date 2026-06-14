@@ -89,7 +89,17 @@ def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, *, verbose, log) -> dict
     line = next((l for l in out.stdout.splitlines() if l.startswith("{")), None)
     if not line:
         if verbose:
-            log(f"# {ctx}: no result (stderr: {out.stderr.strip()[-200:]})")
+            err = out.stderr.strip()
+            # The useful part of a load failure (e.g. "Received N parameters not
+            # in model: ...") sits at the END of the traceback, so keep a long
+            # tail — 200 chars truncated it to an undiagnosable weight-name list.
+            tail = err[-1500:]
+            hint = ""
+            if "not in model" in err:
+                hint = ("  [hint: this checkpoint carries weights this mlx_lm "
+                        "version's architecture doesn't expect — try a different "
+                        "build/quant (e.g. an -OptiQ- variant) or upgrade mlx_lm]")
+            log(f"# {ctx}: no result (stderr tail: {tail}){hint}")
         return None
     return json.loads(line)
 

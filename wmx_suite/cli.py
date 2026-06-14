@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import pty
 import re
@@ -37,6 +38,7 @@ from .views import run_messages as view_run
 from .views import benchmark_kokoro as view_bench_kokoro
 from .views import benchmark_kokoro_concurrency as view_bench_kokoro_conc
 from .views import benchmark_embeddings as view_bench_embed
+from .views import search as view_search
 
 # Default Console for the `run` fast path; main() replaces it per-invocation.
 CONSOLE = Console.from_args()
@@ -239,22 +241,80 @@ def cmd_scan(args):
     view_scan.render(args.console, {"models": model_rows, "registered": len(model_rows)})
 
 
+_QUANT_TAGS = ("2-bit", "3-bit", "4-bit", "5-bit", "6-bit", "8-bit",
+               "bf16", "fp16", "fp8")
+
+
+def _quant_from_tags(tags) -> str:
+    for t in tags:
+        if t in _QUANT_TAGS:
+            return t
+    return "—"
+
+
+def cmd_search(args):
+    """Search the Hub for MLX models via the `hf` CLI (no Python hub dep)."""
+    author = None if getattr(args, "all_authors", False) else "mlx-community"
+    cmd = ["hf", "models", "list", "--search", args.query,
+           "--sort", "downloads", "--limit", str(args.limit), "--json"]
+    if author:
+        cmd += ["--author", author]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        args.console.emit(args.console.guidance(
+            "The `hf` CLI isn't installed.",
+            ["wmx-suite search shells out to the Hugging Face CLI to query the Hub."],
+            [("uv pip install -U huggingface_hub", "install it, then retry"),
+             ("open https://huggingface.co/models", "browse the Hub in a browser")]))
+        raise SystemExit(1)
+    except subprocess.TimeoutExpired:
+        args.console.emit(args.console.style("warn", "Hub search timed out (30s)."))
+        raise SystemExit(1)
+    if proc.returncode != 0:
+        args.console.emit(args.console.guidance(
+            "Hub search failed.",
+            [proc.stderr.strip() or "`hf models list` returned an error."],
+            [("hf auth login", "if this is an auth or rate-limit issue"),
+             ("open https://huggingface.co/models", "browse the Hub instead")]))
+        raise SystemExit(1)
+    try:
+        raw = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        raw = []
+    results = []
+    for m in raw:
+        tags = m.get("tags") or []
+        results.append({
+            "id": m["id"],
+            "downloads": m.get("downloads") or 0,
+            "likes": m.get("likes") or 0,
+            "quant": _quant_from_tags(tags),
+            "mlx": ("mlx" in tags) or (m.get("library_name") == "mlx"),
+        })
+    view_search.render(args.console, {
+        "query": args.query, "author": author, "limit": args.limit,
+        "count": len(results), "results": results,
+    })
+
+
 def cmd_show(args):
-    info = models.describe(args.hf_id)
+    hf_id = models.resolve_hf_id(args.hf_id)
+    info = models.describe(hf_id)
     if info is None:
         view_run.render_not_found(args.console, {
-            "model": args.hf_id,
+            "model": hf_id,
             "cache_path": os.environ.get("HF_HOME", "~/.cache/huggingface/hub"),
             "hf_home_set": "HF_HOME" in os.environ,
         })
         raise SystemExit(1)
     if not info.is_causal:
-        print(f"WARNING: Model {args.hf_id} is in HF cache but is not a supported causal language model.")
+        print(f"WARNING: Model {hf_id} is in HF cache but is not a supported causal language model.")
     d = info.as_dict()
     bpt = info.fp16_kv_bytes_per_token()
     cache_type = d["cache_type"]
     data = {
-        "hf_id": args.hf_id,
+        "hf_id": hf_id,
         "weights_gb": info.weights_gb,
         "n_layers": d["n_layers"],
         "growing_layers": d["growing_layers"],
@@ -277,14 +337,15 @@ def cmd_show(args):
 
 def cmd_characterize(args):
     margin = _configured_margin(args.margin)
-    probe.characterize(args.hf_id, margin_gb=margin, allow_min_probe=args.min_probe,
-                       repeats=args.repeats)
+    probe.characterize(models.resolve_hf_id(args.hf_id), margin_gb=margin,
+                       allow_min_probe=args.min_probe, repeats=args.repeats)
 
 
 def cmd_calibrate(args):
     """Measure this machine's cold-start overhead and store a per-machine profile."""
     margin = _configured_margin(args.margin)
-    result = probe.calibrate(args.model, margin_gb=margin)
+    model = models.resolve_hf_id(args.model) if args.model else args.model
+    result = probe.calibrate(model, margin_gb=margin)
     dev, ram, osv = result["machine_key"]
     print("=" * 60)
     print("  Calibrated cold-start overhead for this machine")
@@ -1139,13 +1200,20 @@ def cmd_run_raw(run_args: list[str]):
     Done manually (not argparse) because argparse.REMAINDER mishandles optionals that
     precede the positional, and we want `run --model X ...` to work as a drop-in.
     """
+    if run_args and run_args[0] in ("-h", "--help"):
+        print(RUN_HELP); return
     margin, force, dry, log = None, False, False, True
     co_run_kokoro = False
+    rest: list[str] = []
     i = 0
     while i < len(run_args):
         a = run_args[i]
-        if a in ("-h", "--help"):
-            print(RUN_HELP); return
+        # Everything after a literal `--` is passthrough verbatim (escape hatch).
+        if a == "--":
+            rest.extend(run_args[i + 1:]); break
+        # Suite-only flags are recognized ANYWHERE in the arg list (not just
+        # before the model), so `run --model X ... --dry-run` works. These names
+        # are not mlx_lm.generate flags, so extracting them is unambiguous.
         if a == "--margin":
             if i + 1 >= len(run_args):
                 raise SystemExit("[run] --margin requires a value")
@@ -1160,10 +1228,7 @@ def cmd_run_raw(run_args: list[str]):
             log = False; i += 1; continue
         if a == "--co-run-kokoro":
             co_run_kokoro = True; i += 1; continue
-        break  # first non-suite token: the rest is passthrough
-    rest = run_args[i:]
-    if rest and rest[0] == "--":
-        rest = rest[1:]
+        rest.append(a); i += 1  # passthrough to mlx_lm.generate
     _run(rest, margin=margin, force=force, dry_run=dry, log=log, co_run_kokoro=co_run_kokoro)
 
 
@@ -1171,15 +1236,23 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
          dry_run: bool, log: bool = True, co_run_kokoro: bool = False):
     """Crash-safe launch: plan a launch, then exec mlx_lm.generate."""
     model_id = None
+    model_idx = None  # index in rest whose value we rewrite after resolution
     for i, a in enumerate(rest):
         if a == "--model" and i + 1 < len(rest):
-            model_id = rest[i + 1]
+            model_id = rest[i + 1]; model_idx = i + 1
             break
         if a.startswith("--model="):
-            model_id = a.split("=", 1)[1]
+            model_id = a.split("=", 1)[1]; model_idx = i
             break
     if model_id is None:
         raise SystemExit("[run] --model is required")
+    # Accept short names (e.g. gemma-4-e4b-it-4bit); rewrite the passthrough so
+    # mlx_lm.generate receives the full org/name id too.
+    resolved = models.resolve_hf_id(model_id)
+    if resolved != model_id:
+        rest[model_idx] = (f"--model={resolved}" if rest[model_idx].startswith("--model=")
+                           else resolved)
+        model_id = resolved
 
     margin_gb = _configured_margin(margin)
     if co_run_kokoro:
@@ -1344,6 +1417,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
     p.set_defaults(func=cmd_health)
     sub.add_parser("scan").set_defaults(func=cmd_scan)
+    p = sub.add_parser("search", help="search the Hub for MLX models to download")
+    p.add_argument("query", help="search text, e.g. 'gemma-4'")
+    p.add_argument("--limit", type=int, default=15, help="max results (default 15)")
+    p.add_argument("--all-authors", action="store_true",
+                   help="don't restrict to mlx-community")
+    p.set_defaults(func=cmd_search)
     p = sub.add_parser("show"); p.add_argument("hf_id"); p.set_defaults(func=cmd_show)
     p = sub.add_parser("characterize"); p.add_argument("hf_id")
     p.add_argument("--margin", default=None,

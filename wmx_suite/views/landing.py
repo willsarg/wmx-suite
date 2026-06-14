@@ -96,6 +96,7 @@ def render(console, data: dict) -> None:
 
     # ── MODELS ──────────────────────────────────────────────────────────────
     c.emit(c.section("  MODELS"))
+    c.emit(_cmd(c, "search <query>",       "find MLX models on the Hub to download"))
     c.emit(_cmd(c, "scan",                 "register mlx-community models found in your HF cache"))
     c.emit(_cmd(c, "show <model>",         "architecture + KV-cache memory class for one model"))
     c.emit(_cmd(c, "characterize <model>", "safely measure a model's max safe context"))
