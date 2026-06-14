@@ -143,3 +143,83 @@ def test_worker_preflight_refusal_never_loads(monkeypatch, capsys):
     data = json.loads(next(l for l in out.splitlines() if l.startswith("{")))
     assert data["status"] == "error"
     assert load_calls == []  # model NEVER loaded — RULE #1 guard
+
+
+def test_fit_recovers_known_coeffs():
+    from wmx_suite import embeddings_probe as ep
+    pts = []
+    for b, s in [(1, 128), (1, 256), (1, 512), (2, 512), (4, 256)]:
+        x1, x2 = b * s, b * s * s
+        pts.append((x1, x2, 1e-6 * x1 + 2e-8 * x2))
+    a, b = ep._fit_ab(pts)
+    assert a == pytest.approx(1e-6, rel=1e-3)
+    assert b == pytest.approx(2e-8, rel=1e-3)
+
+
+def test_cold_start_gate_uses_nonzero_model_base(monkeypatch):
+    from wmx_suite import embeddings_probe as ep
+    spawned = []
+    monkeypatch.setattr(ep, "sample_settled_baseline",
+                        lambda: 15.18 - ep.MODEL_BASE_SEED_GB + 0.01)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=3.0))
+    monkeypatch.setattr(ep, "_run_cell",
+                        lambda *a, **k: spawned.append(a) or {"status": "rung_done"})
+    events = []
+    summary = ep.sweep(con=None, run_id=1, model="m",
+                       batches=[1], seqs=[128], repeats=1, margin_gb=2.0,
+                       on_event=events.append, persist=False)
+    assert spawned == []
+    assert any(e["event"] == "preflight_abort" for e in events)
+
+
+def test_predictive_skip_does_not_spawn_unsafe_cell(monkeypatch):
+    from wmx_suite import embeddings_probe as ep
+    spawned = []
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        spawned.append((batch, seq))
+        x2 = batch * seq * seq
+        delta = 5.0e-7 * x2
+        return {"status": "rung_done", "batch": batch, "seq": seq,
+                "os_wired_gb": 3.0 + delta, "peak_gb": 1.0,
+                "throughput_tps": 1.0, "latency_ms": 1.0}
+
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 3.0)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=3.0))
+    events = []
+    ep.sweep(con=None, run_id=1, model="m",
+             batches=[1], seqs=[512, 1024, 2048, 4096, 8192], repeats=1, margin_gb=2.0,
+             on_event=events.append, persist=False)
+    skipped = [e for e in events if e["event"] == "row_skipped"]
+    assert skipped, "expected at least one predictive skip"
+    skipped_seqs = {e["seq"] for e in skipped}
+    assert not (skipped_seqs & {s for (_, s) in spawned})
+
+
+def test_monotonic_pruning_skips_larger_batch_same_seq(monkeypatch):
+    from wmx_suite import embeddings_probe as ep
+    spawned = []
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        spawned.append((batch, seq))
+        x2 = batch * seq * seq
+        return {"status": "rung_done", "batch": batch, "seq": seq,
+                "os_wired_gb": 3.0 + 5.0e-7 * x2, "peak_gb": 1.0,
+                "throughput_tps": 1.0, "latency_ms": 1.0}
+
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 3.0)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=3.0))
+    events = []
+    ep.sweep(con=None, run_id=1, model="m",
+             batches=[1, 32], seqs=[2048, 8192], repeats=1, margin_gb=2.0,
+             on_event=events.append, persist=False)
+    if (1, 8192) not in spawned:
+        assert (32, 8192) not in spawned
