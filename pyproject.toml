@@ -9,6 +9,7 @@ authors = [{ name = "Will Sarg" }]
 requires-python = ">=3.12"
 dependencies = [
     "kokoro-mlx>=0.1.2",
+    "mlx-embeddings>=0.1.0",
     "mlx-lm>=0.31",
     "soundfile>=0.14.0",
 ]
