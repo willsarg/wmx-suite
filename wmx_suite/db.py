@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS fits (
     ref_baseline_gb  REAL,               -- live system baseline used for the ceiling calc
     threshold_gb     REAL,
     safe_ceiling_ctx INTEGER,            -- context where (ref_baseline + model_base + slope*c) hits threshold
-    hard_wall_ctx    INTEGER,            -- ... hits the 17.18 wall
+    hard_wall_ctx    INTEGER,            -- ... hits the measured wall (17.18 GB on the testbed)
     n_points         INTEGER,
     created_at       TEXT,
     FOREIGN KEY (run_id) REFERENCES probe_runs(id)

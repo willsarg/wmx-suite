@@ -1,8 +1,11 @@
 """System memory facts for this machine.
 
-The crash wall is NOT total RAM — it's the GPU/Metal recommended working-set size,
-because MLX allocates wired (non-swappable) Metal buffers. On the M4 Pro (24GB) this
-is ~17.18 GB (67% of total). Crossing it, with almost no swap, can hard-lock the system.
+The crash wall is NOT total RAM — it's the GPU/Metal recommended working-set size
+(max_recommended_working_set_size), because MLX allocates wired (non-swappable) Metal
+buffers. It is read LIVE per machine and treated as an exact, measured value — never
+approximated, because rounding toward the wall is how you crash. On the M4 Pro testbed
+(24 GB) it is 17.18 GB (67% of total). Crossing it, with almost no swap, can hard-lock
+the system.
 """
 from __future__ import annotations
 

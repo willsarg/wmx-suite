@@ -3,9 +3,10 @@
 Two failure modes a naive launcher hits, and how we avoid them:
   1. Forcing `--kv-bits 4` on every model crashes RotatingKVCache models (Gemma,
      GPT-OSS) past 5000 tokens. We quantize ONLY models whose cache supports it.
-  2. Budgeting against TOTAL RAM ignores the real wired wall (17.18 GB) and the prefill
-     spike. We budget against the measured per-model curve and the live system baseline,
-     refusing to launch if the model can't even load without breaching the wall.
+  2. Budgeting against TOTAL RAM ignores the real wired wall (the live, per-machine
+     working-set limit — 17.18 GB on the testbed) and the prefill spike. We budget against
+     the measured per-model curve and the live system baseline, refusing to launch if the
+     model can't even load without breaching the wall.
 """
 from __future__ import annotations
 

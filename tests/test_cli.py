@@ -692,3 +692,28 @@ def test_system_reports_no_profile(monkeypatch, tmp_path, capsys):
     cli.cmd_system(SimpleNamespace())
     out = capsys.readouterr().out
     assert "calibration profile" in out.lower()
+
+
+def test_health_no_profile_warning_generalizes_to_non_testbed_machine(
+    monkeypatch, tmp_path, capsys
+):
+    """The uncalibrated warning must fire on any M-series machine, not just the M4 Pro
+    testbed — guards against special-casing the testbed's machine_key."""
+    from types import SimpleNamespace
+    from wmx_suite import cli, db, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    # A different, never-calibrated SKU (not the M4 Pro testbed).
+    monkeypatch.setattr(profiles, "machine_key", lambda: ("Apple M2", 17179869184, 14))
+    monkeypatch.setattr(
+        cli, "read_limits",
+        lambda: SystemLimits(
+            device="Apple M2", total_gb=16.0, wall_gb=11.0, max_buffer_gb=6.0,
+            swap_free_gb=2.0, wired_now_gb=2.0,
+        ),
+    )
+    monkeypatch.setattr(cli, "sample_settled_baseline", lambda: 2.0)
+    cli.cmd_health(SimpleNamespace(margin=None))
+    out = capsys.readouterr().out
+    assert "No calibration profile" in out
+    assert "Apple M2" in out          # reports the actual machine, not a hardcoded testbed
+    assert "calibrate" in out

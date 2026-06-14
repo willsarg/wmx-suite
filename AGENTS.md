@@ -4,21 +4,29 @@ Orientation for any AI agent working in this repo. Read this before running anyt
 
 ## What this project is
 
-A custom memory/stress bench for local MLX inference on an **M4 Pro MacBook (24 GB)**.
-It finds each model's **safe context ceiling** so we never run a model+context that
-crashes the machine. It does this by **extrapolating from safe measurements**, never by
-probing into the danger zone.
+A custom memory/stress bench for local MLX inference on **Apple M-series Macs**. It finds
+each model's **safe context ceiling** so we never run a model+context that crashes the
+machine. It does this by **extrapolating from safe measurements**, never by probing into
+the danger zone.
+
+Every machine-specific number (the crash wall, ambient baseline, per-model fits) is
+**measured live on whatever machine the suite runs on** — nothing is hardcoded to one
+host. The **primary testbed is Will's M4 Pro MacBook (24 GB)**: it generates the reference
+data and the example numbers below, but the suite is meant to be trustworthy across
+M-series SKUs.
 
 ## RULE #1 — NEVER CRASH THE LAPTOP
 
 This overrides convenience, speed, and completeness. Concretely:
 
 - **Never launch a model run whose predicted OS-wired peak exceeds the safe threshold**
-  (`wall − 2 GB` ≈ 15.18 GB). Use `probe.characterize()` / the pre-flight gate; do not
-  call `mlx_lm` directly at high context to "just see."
-- **The crash wall is `max_recommended_working_set_size` ≈ 17.18 GB**, not total RAM.
-  MLX wires (non-swappable) Metal buffers; swap is ~1 GB, so crossing the wall can
-  **hard-lock or kernel-panic the machine**, not fail gracefully.
+  (`wall − margin`, default margin 2 GB; on the testbed = 15.18 GB). Use
+  `probe.characterize()` / the pre-flight gate; do not call `mlx_lm` directly at high
+  context to "just see."
+- **The crash wall is `max_recommended_working_set_size`**, not total RAM — read live per
+  machine and used as an exact, measured value, never rounded toward (on the testbed it is
+  17.18 GB). MLX wires (non-swappable) Metal buffers; swap is ~1 GB, so crossing the wall
+  can **hard-lock or kernel-panic the machine**, not fail gracefully.
 - **Do not `sudo sysctl iogpu.wired_limit_mb=...` to raise the ceiling** without explicit
   user approval — it eats the OS floor and makes a hard lock *more* likely.
 - When in doubt, probe **smaller** first and let the extrapolation tell you the ceiling.

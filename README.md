@@ -24,10 +24,11 @@
 ## 🧠 Why this exists
 
 MLX allocates **wired** (non-swappable) Metal buffers. The real crash ceiling isn't
-total RAM — it's the GPU working-set limit (`max_recommended_working_set_size`,
-≈ **17.18 GB** on the reference M4 Pro, 67% of 25.77 GB). With almost no swap free,
-crossing it can hard-lock the system rather than fail gracefully. So we **predict the
-wall and stay under it.**
+total RAM — it's the GPU working-set limit (`max_recommended_working_set_size`), which the
+suite reads **live on each machine** and treats as an exact, measured value (rounding
+toward it is how you crash). On the reference M4 Pro testbed it is **17.18 GB** (67% of
+25.77 GB). With almost no swap free, crossing it can hard-lock the system rather than fail
+gracefully. So we **predict the wall and stay under it.**
 
 ### 🔬 Key facts the design is built on
 

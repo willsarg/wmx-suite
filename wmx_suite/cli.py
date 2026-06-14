@@ -114,7 +114,8 @@ def cmd_system(_):
         print(f"calibration profile : overhead {prof['fixed_overhead_gb']:.2f} GB "
               f"(model {prof['model_id']}, {prof['calibrated_at']})")
     else:
-        print("calibration profile : none — using M4-Pro defaults; run 'wmx-suite calibrate'")
+        print("calibration profile : none — using M4 Pro testbed cold-start priors; "
+              "run 'wmx-suite calibrate' to tune for this machine")
 
 
 def cmd_health(args):
@@ -148,7 +149,8 @@ def cmd_health(args):
     if db.get_profile(con, key) is None:
         dev, ram, osv = key
         print(f"\nNo calibration profile for {dev}/{ram / 1e9:.0f}GB/macOS {osv}; "
-              "cold-start estimates use M4-Pro defaults. Run 'wmx-suite calibrate'.")
+              "cold-start estimates fall back to M4 Pro testbed priors. "
+              "Run 'wmx-suite calibrate' to tune for this machine.")
     rows = con.execute(
         "SELECT DISTINCT m.hf_id, m.max_context FROM models m "
         "JOIN probe_runs r ON r.hf_id = m.hf_id JOIN fits f ON f.run_id = r.id "
@@ -1051,8 +1053,9 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
           f"{p['base_abs_gb']}GB  |  slope {p['slope_gb_per_k']}GB/1k  |  "
           f"wall {p['wall_gb']}GB  threshold {p['threshold_gb']}GB", file=sys.stderr)
     if p["source"] == "estimated" and p.get("cold_start_profile") == "default":
-        print("[run] WARNING: using default cold-start constants tuned for Apple M4 Pro; "
-              "run 'wmx-suite calibrate' to tune them for this machine.", file=sys.stderr)
+        print("[run] WARNING: using fallback cold-start constants measured on the Apple "
+              "M4 Pro testbed; run 'wmx-suite calibrate' to tune them for this machine.",
+              file=sys.stderr)
 
     if p.get("refuse"):
         print(f"[run] REFUSED: {p['reason']}", file=sys.stderr)

@@ -1,8 +1,9 @@
 """Per-machine cold-start constants for the pre-flight base estimate.
 
 The crash wall, the ambient baseline, and per-model fits already adapt to the host
-at runtime. The only M4-Pro-tuned part is the cold-start base estimate for models that
-haven't been characterized yet. `wmx-suite calibrate` measures this machine's real
+at runtime. The only part still tied to the testbed is the cold-start base estimate for
+models that haven't been characterized yet: until a machine is calibrated it falls back to
+priors measured on the M4 Pro testbed. `wmx-suite calibrate` measures this machine's real
 FIXED_OVERHEAD_GB once and stores it (keyed by chip + RAM + macOS major) so the estimate
 is trustworthy on any Apple Silicon SKU. `characterize` remains the per-model mechanism.
 """
@@ -12,7 +13,8 @@ import sqlite3
 
 from . import db, system
 
-# Loose priors, measured loosely on the M4 Pro (see probe.py). The resident factor is
+# Loose priors, measured loosely on the M4 Pro testbed (see probe.py); the per-machine
+# fallback until `calibrate` runs. The resident factor is
 # HELD FIXED (effective factor measured 0.88-1.10 across models); only the overhead is
 # calibrated per machine, and never stored below this default (calibration only tightens).
 DEFAULT_RESIDENT_FACTOR = 1.05

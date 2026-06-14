@@ -6,11 +6,12 @@ conventions. This file only adds Claude Code specifics.
 
 ## The one rule that matters most
 
-**NEVER CRASH THE LAPTOP.** The crash wall is ~17.18 GB of wired memory (not total RAM),
-swap is ~1 GB, and crossing it can hard-lock the machine. Never launch a model run whose
-predicted OS-wired peak exceeds the safe threshold (~15.18 GB). Use the `characterize`
-pre-flight gate; do not call `mlx_lm` directly at high context to test. See AGENTS.md
-for the full reasoning.
+**NEVER CRASH THE LAPTOP.** The crash wall is the wired-memory working-set limit (read
+live per machine, treated as exact — never rounded toward; it is 17.18 GB on the M4 Pro
+testbed), not total RAM. Swap is ~1 GB, and crossing the wall can hard-lock the machine.
+Never launch a model run whose predicted OS-wired peak exceeds the safe threshold
+(`wall − margin`; 15.18 GB on the testbed). Use the `characterize` pre-flight gate; do not
+call `mlx_lm` directly at high context to test. See AGENTS.md for the full reasoning.
 
 ## Running things
 
