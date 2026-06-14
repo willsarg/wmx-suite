@@ -145,16 +145,6 @@ def test_worker_preflight_refusal_never_loads(monkeypatch, capsys):
     assert load_calls == []  # model NEVER loaded — RULE #1 guard
 
 
-def test_fit_recovers_known_coeffs():
-    from wmx_suite import embeddings_probe as ep
-    pts = []
-    for b, s in [(1, 128), (1, 256), (1, 512), (2, 512), (4, 256)]:
-        x1, x2 = b * s, b * s * s
-        pts.append((x1, x2, 1e-6 * x1 + 2e-8 * x2))
-    a, b = ep._fit_ab(pts)
-    assert a == pytest.approx(1e-6, rel=1e-3)
-    assert b == pytest.approx(2e-8, rel=1e-3)
-
 
 def test_cold_start_gate_uses_nonzero_model_base(monkeypatch):
     from wmx_suite import embeddings_probe as ep
@@ -324,6 +314,25 @@ def test_embedding_profile_roundtrip_and_key_mismatch(monkeypatch, tmp_path):
 
     stale = ("Apple M4 Pro", 25769803776, 15, "0.32.0", "mlx-community/test-embed")
     assert db.get_embedding_profile(con, stale) is None
+
+
+def test_fit_cab_recovers_known_coeffs_and_handles_singular():
+    from wmx_suite import embeddings_probe as ep
+    # delta = 1.0 + 1e-6*x1 + 2e-8*x2 exactly, over varied (batch, seq)
+    pts = []
+    for bsz, s in [(1, 128), (1, 512), (2, 256), (4, 512), (8, 1024)]:
+        x1, x2 = bsz * s, bsz * s * s
+        pts.append((x1, x2, 1.0 + 1e-6 * x1 + 2e-8 * x2))
+    c, a, b = ep._fit_cab(pts)
+    assert c == pytest.approx(1.0, abs=1e-6)
+    assert a == pytest.approx(1e-6, rel=1e-3)
+    assert b == pytest.approx(2e-8, rel=1e-3)
+
+    # < 3 points -> None
+    assert ep._fit_cab([(128.0, 16384.0, 1.0), (256.0, 65536.0, 1.1)]) is None
+    # collinear (all identical feature rows) -> singular -> None
+    same = [(128.0, 16384.0, 1.0)] * 5
+    assert ep._fit_cab(same) is None
 
 
 def test_profiles_embedding_coeffs_roundtrip(monkeypatch, tmp_path):

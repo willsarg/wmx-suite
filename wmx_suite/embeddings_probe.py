@@ -43,25 +43,52 @@ def _default_event(_event: dict) -> None:
     pass
 
 
-def _fit_ab(points: list[tuple[float, float, float]]) -> tuple[float, float] | None:
-    """Least-squares delta = a*x1 + b*x2 through the origin (no intercept).
+def _det3(m: list[list[float]]) -> float:
+    return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
 
-    points: (x1=batch*seq, x2=batch*seq^2, delta). Returns (a, b), or None if the
-    system is singular (e.g. all points at a single seq → collinear features).
-    """
-    s11 = s12 = s22 = sd1 = sd2 = 0.0
-    for x1, x2, d in points:
-        s11 += x1 * x1
-        s12 += x1 * x2
-        s22 += x2 * x2
-        sd1 += x1 * d
-        sd2 += x2 * d
-    det = s11 * s22 - s12 * s12
+
+def _solve3(mat: list[list[float]], rhs: list[float]) -> tuple[float, float, float] | None:
+    """Solve a 3x3 linear system by Cramer's rule. Returns None if singular."""
+    det = _det3(mat)
     if abs(det) < 1e-30:
         return None
-    a = (sd1 * s22 - sd2 * s12) / det
-    b = (s11 * sd2 - s12 * sd1) / det
-    return a, b
+    out = []
+    for i in range(3):
+        mi = [row[:] for row in mat]
+        for j in range(3):
+            mi[j][i] = rhs[j]
+        out.append(_det3(mi) / det)
+    return (out[0], out[1], out[2])
+
+
+def _fit_cab(points: list[tuple[float, float, float]]) -> tuple[float, float, float] | None:
+    """Least-squares delta = c + a*x1 + b*x2 (intercept + linear + quadratic).
+
+    points: (x1=batch*seq, x2=batch*seq^2, delta). Returns (c, a, b), or None when there
+    are <3 points or the normal-equation system is singular (e.g. a degenerate grid with
+    only one distinct (x1, x2)). The intercept c keeps fixed model residency out of the
+    slope terms, which is what prevents through-origin extrapolation blow-up.
+    """
+    n = len(points)
+    if n < 3:
+        return None
+    sx1 = sx2 = sy = sx11 = sx12 = sx22 = sx1y = sx2y = 0.0
+    for x1, x2, y in points:
+        sx1 += x1
+        sx2 += x2
+        sy += y
+        sx11 += x1 * x1
+        sx12 += x1 * x2
+        sx22 += x2 * x2
+        sx1y += x1 * y
+        sx2y += x2 * y
+    mat = [[float(n), sx1, sx2],
+           [sx1, sx11, sx12],
+           [sx2, sx12, sx22]]
+    rhs = [sy, sx1y, sx2y]
+    return _solve3(mat, rhs)
 
 
 def _coeffs(points: list[tuple[float, float, float]]) -> tuple[float, float]:
@@ -71,10 +98,10 @@ def _coeffs(points: list[tuple[float, float, float]]) -> tuple[float, float]:
     trust a fit, so a degenerate grid never under-predicts."""
     if len(points) < MIN_FIT_POINTS:
         return A_COLD, B_COLD
-    fit = _fit_ab(points)
+    fit = _fit_cab(points)
     if fit is None:
         return A_COLD, B_COLD
-    a_fit, b_fit = fit
+    _c, a_fit, b_fit = fit
     return max(A_FLOOR, a_fit), max(B_FLOOR, b_fit)
 
 
