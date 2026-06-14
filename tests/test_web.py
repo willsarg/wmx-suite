@@ -191,6 +191,26 @@ def test_kokoro_baseline_route(client):
     assert "mlx-community/Kokoro-82M-bf16" in html
 
 
+def test_embeddings_routes(monkeypatch, tmp_path):
+    from wmx_suite import db
+    from wmx_suite.web.app import create_app
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    con = db.connect()
+    run_id = db.start_embeddings_run(con, "mlx-community/test", "0.31.2")
+    db.add_embeddings_measurement(con, run_id, batch_size=1, seq_len=128,
+                                  os_wired_gb=4.0, peak_gb=2.0,
+                                  throughput_tps=100.0, latency_ms=5.0)
+
+    app = create_app()
+    app.config.update(TESTING=True)
+    client = app.test_client()
+
+    assert client.get("/embeddings").status_code == 200
+    assert client.get(f"/embeddings/run/{run_id}").status_code == 200
+    assert client.get("/embeddings/run/99999").status_code == 404
+
+
 def test_import_without_flask(monkeypatch):
     """Importing wmx_suite.web.app must succeed even when Flask is unavailable,
     and create_app() must raise ImportError with a clear message."""

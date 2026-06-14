@@ -457,6 +457,43 @@ def create_app():
             limits=limits
         )
 
+    @app.route("/embeddings")
+    def embeddings_dashboard():
+        con = get_db()
+        runs = db.get_all_embeddings_runs(con)
+        limits = system.read_limits()
+        decorated = []
+        for r in runs:
+            m = db.get_embeddings_measurements(con, r["id"])
+            decorated.append({
+                "id": r["id"],
+                "model_id": r["model_id"],
+                "mlx_version": r["mlx_version"],
+                "created_at": r["created_at"],
+                "n_cells": len(m),
+                "max_wired_gb": round(max((x["os_wired_gb"] for x in m), default=0.0), 2),
+                "max_tps": round(max((x["throughput_tps"] for x in m), default=0.0), 0),
+            })
+        return render_template("embeddings_dashboard.html", runs=decorated, limits=limits)
+
+    @app.route("/embeddings/run/<int:run_id>")
+    def embeddings_run_detail(run_id):
+        con = get_db()
+        runs = db.get_all_embeddings_runs(con)
+        run = next((r for r in runs if r["id"] == run_id), None)
+        if not run:
+            abort(404, description=f"Embeddings Run not found: {run_id}")
+        measurements = db.get_embeddings_measurements(con, run_id)
+        batches = sorted({m["batch_size"] for m in measurements})
+        seqs = sorted({m["seq_len"] for m in measurements})
+        # Build nested dict {batch_size: {seq_len: measurement}} for Jinja-friendly access
+        grid = {}
+        for m in measurements:
+            grid.setdefault(m["batch_size"], {})[m["seq_len"]] = m
+        limits = system.read_limits()
+        return render_template("embeddings_run.html", run=run, measurements=measurements,
+                               batches=batches, seqs=seqs, grid=grid, limits=limits)
+
     @app.route("/kokoro-baseline")
     def kokoro_baseline_dashboard():
         con = get_db()

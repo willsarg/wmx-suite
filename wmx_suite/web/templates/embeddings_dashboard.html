@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Embeddings Benchmark Dashboard — Will's MLX Suite{% endblock %}
+
+{% block content %}
+<div class="header-area">
+    <div>
+        <h1 class="page-title">ModernBERT Embeddings — Memory Surface</h1>
+        <p class="page-subtitle">Each run sweeps a batch × sequence-length grid, recording OS-wired memory and throughput.
+        Cells predicted to breach the wall are skipped, never run.</p>
+    </div>
+</div>
+
+<!-- Embeddings Run History -->
+<div class="card">
+    <div class="card-title" style="margin-bottom: 1.5rem;">
+        <span>Completed Embeddings Benchmark Runs</span>
+        <span class="badge badge-cyan">memory surface</span>
+    </div>
+    <div class="table-responsive">
+        <table class="custom-table">
+            <thead>
+                <tr>
+                    <th>Run ID</th>
+                    <th>Model Identifier</th>
+                    <th>MLX Version</th>
+                    <th>Executed At</th>
+                    <th>Cells</th>
+                    <th>Max OS-Wired (GB)</th>
+                    <th>Max tok/s</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in runs %}
+                <tr>
+                    <td style="font-weight: 600; color: var(--text-secondary);">#{{ r.id }}</td>
+                    <td style="font-weight: 500;">{{ r.model_id }}</td>
+                    <td><code>{{ r.mlx_version or 'unknown' }}</code></td>
+                    <td>{{ r.created_at }}</td>
+                    <td>{{ r.n_cells }}</td>
+                    <td style="color: var(--neon-cyan); font-weight: 600;">{{ r.max_wired_gb }} GB</td>
+                    <td style="color: var(--neon-purple); font-weight: 600;">{{ r.max_tps | int }}</td>
+                    <td>
+                        <a href="{{ url_for('embeddings_run_detail', run_id=r.id) }}" class="btn btn-outline" style="padding: 0.4rem 0.8rem; font-size: 0.8rem; border-radius: 8px;">View Run</a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 4rem 0;">
+                        No embeddings benchmarks recorded yet. Run
+                        <code style="background: rgba(0,0,0,0.3); padding: 0.3rem 0.6rem; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">uv run wmx-suite benchmark-embeddings</code>
+                        to profile the memory surface.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

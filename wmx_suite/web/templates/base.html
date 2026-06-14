@@ -59,6 +59,11 @@
                     <span>⚖️</span> Kokoro Baseline
                 </a>
             </li>
+            <li class="nav-item {% if request.path.startswith('/embeddings') %}active{% endif %}">
+                <a href="{{ url_for('embeddings_dashboard') }}">
+                    <span>🧬</span> Embeddings
+                </a>
+            </li>
         </ul>
         
         <!-- Live System Widget -->
