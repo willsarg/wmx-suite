@@ -427,3 +427,89 @@ def test_model_base_clamped_to_seed_on_negative_intercept(monkeypatch):
     ep.sweep(con=None, run_id=1, model="m", batches=[1], seqs=[128], repeats=1,
              margin_gb=2.0, on_event=lambda e: None, persist=False)
     assert spawned == [(1, 128)]  # didn't crash on negative c, didn't falsely abort
+
+
+def test_sweep_autoupserts_profile_after_run(monkeypatch, tmp_path):
+    from wmx_suite import embeddings_probe as ep, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key",
+                        lambda: ("Apple M4 Pro", 25769803776, 15))
+    con = db.connect()
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        return {"status": "rung_done", "batch": batch, "seq": seq,
+                "os_wired_gb": 2.71 + 0.001 * batch * seq, "peak_gb": 1.0,
+                "throughput_tps": 1.0, "latency_ms": 1.0}
+
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 2.71)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=2.71))
+    run_id = db.start_embeddings_run(con, "org/m", "0.31.2")
+    ep.sweep(con, run_id, "org/m", batches=[1], seqs=[128, 256, 512, 1024, 2048],
+             repeats=1, margin_gb=2.0, mlx_version="0.31.2", on_event=lambda e: None)
+    assert profiles.embedding_coeffs(con, "org/m", "0.31.2") is not None
+
+
+def test_sweep_loads_stored_profile(monkeypatch, tmp_path):
+    from wmx_suite import embeddings_probe as ep, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key",
+                        lambda: ("Apple M4 Pro", 25769803776, 15))
+    con = db.connect()
+    profiles.upsert_embedding_coeffs(con, "org/m", "0.31.2",
+                                     coef_intercept_gb=1.1, coef_linear=2e-5,
+                                     coef_quad=6e-9, n_points=20)
+
+    seen = {}
+    real_coeffs = ep._coeffs
+    def spy_coeffs(points, stored):
+        seen["stored"] = stored
+        return real_coeffs(points, stored)
+    monkeypatch.setattr(ep, "_coeffs", spy_coeffs)
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        return {"status": "rung_done", "batch": batch, "seq": seq, "os_wired_gb": 2.8,
+                "peak_gb": 1.0, "throughput_tps": 1.0, "latency_ms": 1.0}
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 2.71)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=2.71))
+    run_id = db.start_embeddings_run(con, "org/m", "0.31.2")
+    ep.sweep(con, run_id, "org/m", batches=[1], seqs=[128], repeats=1, margin_gb=2.0,
+             mlx_version="0.31.2", on_event=lambda e: None)
+    assert seen["stored"] == (1.1, 2e-5, 6e-9)
+
+
+def test_sweep_ignore_profile_skips_load_but_still_upserts(monkeypatch, tmp_path):
+    from wmx_suite import embeddings_probe as ep, profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key",
+                        lambda: ("Apple M4 Pro", 25769803776, 15))
+    con = db.connect()
+    profiles.upsert_embedding_coeffs(con, "org/m", "0.31.2",
+                                     coef_intercept_gb=9.9, coef_linear=1.0,
+                                     coef_quad=1.0, n_points=1)
+    seen = {}
+    real_coeffs = ep._coeffs
+    monkeypatch.setattr(ep, "_coeffs",
+                        lambda points, stored: seen.setdefault("stored", stored) or real_coeffs(points, stored))
+
+    def fake_run_cell(py, model, batch, seq, repeats, margin):
+        return {"status": "rung_done", "batch": batch, "seq": seq,
+                "os_wired_gb": 2.71 + 0.001 * batch * seq, "peak_gb": 1.0,
+                "throughput_tps": 1.0, "latency_ms": 1.0}
+    monkeypatch.setattr(ep, "_run_cell", fake_run_cell)
+    monkeypatch.setattr(ep, "sample_settled_baseline", lambda: 2.71)
+    monkeypatch.setattr(ep, "read_limits",
+                        lambda: SimpleNamespace(safe_threshold_gb=lambda m=2.0: 15.18,
+                                                wall_gb=17.18, wired_now_gb=2.71))
+    run_id = db.start_embeddings_run(con, "org/m", "0.31.2")
+    ep.sweep(con, run_id, "org/m", batches=[1], seqs=[128, 256, 512, 1024, 2048],
+             repeats=1, margin_gb=2.0, mlx_version="0.31.2", ignore_profile=True,
+             on_event=lambda e: None)
+    assert seen["stored"] is None
+    assert db.get_embedding_profile(
+        con, profiles.embedding_machine_key("org/m", "0.31.2"))["n_points"] >= 4

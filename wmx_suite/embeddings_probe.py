@@ -13,7 +13,7 @@ import json
 import subprocess
 import sys
 
-from . import config, db
+from . import config, db, profiles
 from .system import read_limits, sample_settled_baseline
 
 DEFAULT_BATCHES = [1, 2, 4, 8, 16, 32]
@@ -137,7 +137,8 @@ def _run_cell(py: str, model: str, batch: int, seq: int, repeats: int, margin: f
 
 
 def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 3,
-          margin_gb: float | None = None, *, on_event=None, persist: bool = True) -> dict:
+          margin_gb: float | None = None, *, mlx_version: str | None = None,
+          ignore_profile: bool = False, on_event=None, persist: bool = True) -> dict:
     """Run the batch x seq memory-surface sweep, gating each cell before it is spawned.
 
     Args:
@@ -147,6 +148,11 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
         batches, seqs: grid axes (default DEFAULT_BATCHES / DEFAULT_SEQS); seqs is sorted.
         repeats: forward passes per cell (passed to the worker).
         margin_gb: safety cushion; resolved via config.margin_gb.
+        mlx_version: MLX version string used as part of the profile key; when None,
+            no profile is loaded and no profile is upserted at the end.
+        ignore_profile: when True, skip loading any stored calibration profile (stored
+            is passed as None to _coeffs); still upserts a new profile at the end if
+            enough points were collected.
         on_event: optional callback invoked with one dict per event —
             {"event": "cell_done"|"row_skipped"|"error"|"preflight_abort", ...}.
         persist: when True and con is not None, each cell is written to the DB.
@@ -165,7 +171,9 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
 
     points: list[tuple[float, float, float]] = []  # (x1, x2, delta)
     model_base = MODEL_BASE_SEED_GB
-    stored = None  # set from the calibration profile in a later task
+    stored = None
+    if not ignore_profile and mlx_version is not None and con is not None:
+        stored = profiles.embedding_coeffs(con, model, mlx_version)
     smallest_unsafe_seq: float = float("inf")  # for monotonic pruning across batches
     n_measured = 0
     n_skipped = 0
@@ -226,6 +234,15 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
                       "os_wired_gb": result["os_wired_gb"], "peak_gb": result["peak_gb"],
                       "throughput_tps": result["throughput_tps"],
                       "latency_ms": result["latency_ms"]})
+
+    if (persist and con is not None and mlx_version is not None
+            and len(points) >= MIN_FIT_POINTS):
+        fit = _fit_cab(points)
+        if fit is not None:
+            c, a, b = fit
+            profiles.upsert_embedding_coeffs(con, model, mlx_version,
+                                             coef_intercept_gb=c, coef_linear=a,
+                                             coef_quad=b, n_points=len(points))
 
     return {"model": model, "run_id": run_id, "n_cells_measured": n_measured,
             "n_cells_skipped": n_skipped}
