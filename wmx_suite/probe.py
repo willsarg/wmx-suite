@@ -82,16 +82,16 @@ def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, con: sqlite3.
     return os_baseline + info.weights_gb * factor + overhead
 
 
-def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, *, verbose, log) -> dict | None:
+def _run_worker(py: str, hf_id: str, ctx: int, kv_bits) -> dict:
     cmd = [py, "-m", "wmx_suite.probe_worker", hf_id, str(ctx)]
     if kv_bits is not None:
         cmd += ["--kv-bits", str(kv_bits)]
     out = subprocess.run(cmd, capture_output=True, text=True)
     line = next((l for l in out.stdout.splitlines() if l.startswith("{")), None)
     if not line:
-        if verbose:
-            log(f"# {ctx}: {_summarize_worker_error(out.stderr)}")
-        return None
+        # No JSON line -> the worker died (usually a model-load error). Return a
+        # one-line summary so the caller can render it cleanly.
+        return {"status": "load_error", "note": _summarize_worker_error(out.stderr)}
     return json.loads(line)
 
 
@@ -126,9 +126,9 @@ def _measure_rung(py: str, hf_id: str, ctx: int, kv_bits, repeats: int, *, verbo
     """
     abss, deltas, peaks = [], [], []
     for _ in range(max(1, repeats)):
-        m = _run_worker(py, hf_id, ctx, kv_bits, verbose=verbose, log=log)
+        m = _run_worker(py, hf_id, ctx, kv_bits)
         if m is None or m.get("status") != "ok":
-            return m  # propagate error/None — stop the ramp
+            return m  # propagate error — stop the ramp
         abss.append(m["os_wired_gb"])
         deltas.append(m["os_wired_gb"] - m["baseline_wired_gb"])
         peaks.append(m["mlx_peak_gb"])
@@ -143,7 +143,7 @@ def _measure_rung(py: str, hf_id: str, ctx: int, kv_bits, repeats: int, *, verbo
 
 def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
                  allow_min_probe: bool = False, repeats: int = DEFAULT_REPEATS,
-                 worker_python: str | None = None, verbose=True) -> dict:
+                 worker_python: str | None = None, verbose=True, console=None) -> dict:
     ramp = ramp or DEFAULT_RAMP
     margin_gb = config.margin_gb(margin_gb)
     limits = read_limits()
@@ -167,53 +167,73 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
         mlx_version=mx.__version__, wall_gb=wall, safe_threshold_gb=threshold,
     )
 
-    def log(*a):
-        if verbose:
-            print(*a, flush=True)
+    # Presentation: render through the ui schema when a console is available
+    # (CLI) or verbose with no console (default to stdout). con_out=None → quiet
+    # (tests pass verbose=False). probe stays decision-only; the view formats.
+    if console is None and verbose:
+        from .ui import Console
+        console = Console.from_args()
+    con_out = console
+    from .views import characterize as _view
 
-    log(f"# {hf_id}")
-    log(f"# wall={wall:.2f}GB  safe_threshold={threshold:.2f}GB  baseline={sweep_baseline:.2f}GB  "
-        f"kv_bits={kv_bits}  cache={info.cache_type}  repeats={repeats}")
+    def log(*a):
+        # Incidental low-level progress; rendered dim. Milestones use the view.
+        if con_out is not None:
+            con_out.emit(con_out.style("dim", "  " + " ".join(str(x) for x in a)))
+
+    est = estimate_base_gb(info, limits, con)
+    if con_out is not None:
+        _view.render_header(con_out, {
+            "model": hf_id, "cache_type": info.cache_type,
+            "kv_mode": ("fp16" if kv_bits is None else f"{kv_bits}-bit"),
+            "wall_gb": wall, "safe_budget_gb": threshold,
+            "baseline_gb": sweep_baseline, "est_gb": est, "weights_gb": info.weights_gb,
+        })
 
     xs_k: list[float] = []   # context in thousands of tokens
     ys: list[float] = []     # DELTA over launch baseline (model's own footprint)
 
     # ---- pre-flight gate -------------------------------------------------
-    est = estimate_base_gb(info, limits, con)
-    log(f"# pre-flight base estimate: {est:.2f}GB (weights {info.weights_gb}GB)")
-
-    def _refuse(reason: str):
-        log(f"# REFUSED: {reason}")
+    def _refuse(reason: str, kind: str):
         db.add_measurement(con, run_id, 0, status="skipped", note=reason)
+        if con_out is not None:
+            _view.render_refusal(con_out, {
+                "model": hf_id, "kind": kind, "est_gb": est,
+                "threshold_gb": threshold, "wall_gb": wall})
         return {"hf_id": hf_id, "refused": True, "reason": reason,
                 "est_base_gb": est, "threshold_gb": threshold, "wall_gb": wall,
                 "run_id": run_id}
 
     if est >= wall:
         return _refuse(f"estimated base {est:.2f}GB >= hard wall {wall:.2f}GB — "
-                       f"cannot load without breaching the wall. Never probe.")
+                       f"cannot load without breaching the wall. Never probe.", "hopeless")
     if est >= threshold:
         if not allow_min_probe:
             return _refuse(f"estimated base {est:.2f}GB >= safe threshold {threshold:.2f}GB "
                            f"(but < wall {wall:.2f}GB). Borderline — re-run with --min-probe "
-                           f"to measure the true base with a supervised 512-token probe.")
+                           f"to measure the true base with a supervised 512-token probe.",
+                           "borderline")
         # supervised minimal probe: deep in the safe zone, replaces the blind guess
-        log(f"# borderline — running supervised {MIN_PROBE_CTX}-token calibration probe...")
-        m = _run_worker(py, hf_id, MIN_PROBE_CTX, kv_bits, verbose=verbose, log=log)
+        if con_out is not None:
+            _view.render_note(con_out, f"borderline — running a supervised "
+                                       f"{MIN_PROBE_CTX}-token calibration probe…")
+        m = _run_worker(py, hf_id, MIN_PROBE_CTX, kv_bits)
         if not m or m.get("status") != "ok":
-            note = (m or {}).get("note", "no output")
-            return _refuse(f"min-probe failed: {note}")
+            return _refuse(f"min-probe failed: {(m or {}).get('note', 'no output')}",
+                           "borderline")
         true_abs = m["os_wired_gb"]
         true_delta = round(true_abs - m["baseline_wired_gb"], 3)
         db.add_measurement(con, run_id, MIN_PROBE_CTX, mlx_peak_gb=m["mlx_peak_gb"],
                            mlx_true_gb=m["mlx_true_gb"], os_wired_gb=true_abs,
                            note=f"min-probe; delta={true_delta}")
-        log(f"# measured @ {MIN_PROBE_CTX}: os_wired={true_abs:.2f}GB  "
-            f"delta={true_delta:.2f}GB (est was {est:.2f}GB)")
+        if con_out is not None:
+            _view.render_rung(con_out, {"ctx": MIN_PROBE_CTX, "os_wired_gb": true_abs,
+                                        "delta_gb": true_delta, "peak_gb": m["mlx_peak_gb"],
+                                        "repeats": 1, "spread_gb": 0.0})
         if true_abs >= threshold:
             return _refuse(f"measured base {true_abs:.2f}GB >= threshold {threshold:.2f}GB "
-                           f"— genuinely too tight, not just a pessimistic estimate.")
-        log(f"# cleared by ground truth ({true_abs:.2f}GB < {threshold:.2f}GB). Proceeding.")
+                           f"— genuinely too tight, not just a pessimistic estimate.",
+                           "borderline")
         xs_k.append(MIN_PROBE_CTX / 1000)
         ys.append(true_delta)
 
@@ -244,19 +264,22 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
             live_base = sample_settled_baseline()
             pred = live_base + fit.model_base_gb + fit.slope_gb_per_k * (ctx / 1000)
             if pred >= threshold:
-                log(f"# STOP before {ctx}: predicted {pred:.2f}GB "
-                    f"(live_base {live_base:.2f} + model {fit.model_base_gb:.2f} + "
-                    f"{fit.slope_gb_per_k:.4f}*{ctx/1000:.1f}) >= {threshold:.2f}GB. "
-                    f"Ceiling reached safely.")
+                if con_out is not None:
+                    _view.render_stop(con_out, {"ctx": ctx, "predicted_gb": pred,
+                                                "safe_budget_gb": threshold})
                 break
 
         m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None:
             db.add_measurement(con, run_id, ctx, status="error", note="no json output")
+            if con_out is not None and not xs_k:
+                _view.render_failure(con_out, {"model": hf_id, "note": "no output from probe worker"})
             break
         if m.get("status") != "ok":
-            log(f"# {ctx}: {m.get('status')} — {m.get('note')}")
             db.add_measurement(con, run_id, ctx, status=m.get("status"), note=m.get("note"))
+            # If the very first rung failed to load, surface a clean failure.
+            if con_out is not None and not xs_k:
+                _view.render_failure(con_out, {"model": hf_id, "note": m.get("note")})
             break  # a crash/NYI here means production can't go here either
 
         delta = m["delta"]
@@ -265,9 +288,10 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
                            note=f"median of {m['repeats']}; delta={delta}; spread={m['spread_gb']}")
         xs_k.append(ctx / 1000)
         ys.append(delta)
-        log(f"{ctx:>8}  os_wired={m['os_wired_gb']:.2f}GB  delta={delta:.2f}GB  "
-            f"mlx_peak={m['mlx_peak_gb']:.2f}GB  (median of {m['repeats']}, "
-            f"spread {m['spread_gb']:.2f}GB)")
+        if con_out is not None:
+            _view.render_rung(con_out, {"ctx": ctx, "os_wired_gb": m["os_wired_gb"],
+                                        "delta_gb": delta, "peak_gb": m["mlx_peak_gb"],
+                                        "repeats": m["repeats"], "spread_gb": m["spread_gb"]})
         _refit()
 
     result = {"hf_id": hf_id, "refused": False, "run_id": run_id,
@@ -275,12 +299,17 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     if fit is not None:
         db.save_fit(con, run_id, fit.__dict__)
         result["fit"] = fit.__dict__
-        log(f"# FIT (delta): model_base={fit.model_base_gb}GB  slope={fit.slope_gb_per_k}GB/1k  "
-            f"(R²={fit.r2}, n={fit.n_points})")
-        log(f"# @ baseline {fit.ref_baseline_gb}GB:  safe ceiling ≈ {fit.safe_ceiling_ctx:,} tok"
-            f"   hard wall ≈ {fit.hard_wall_ctx:,} tok")
-    else:
-        log("# not enough points to fit (need >=2 safe rungs)")
+        if con_out is not None:
+            _view.render_summary(con_out, {
+                "model": hf_id, "safe_ctx": fit.safe_ceiling_ctx,
+                "hard_wall_ctx": fit.hard_wall_ctx, "r2": fit.r2,
+                "n_points": fit.n_points})
+    elif con_out is not None and xs_k:
+        # Measured some points but couldn't fit (need >=2).
+        _view.render_failure(con_out, {
+            "model": hf_id,
+            "note": "couldn't measure enough safe points to fit a curve "
+                    "(need at least 2). Try again, or the model may be borderline."})
     return result
 
 

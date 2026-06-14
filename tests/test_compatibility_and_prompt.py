@@ -105,7 +105,7 @@ def test_run_prompts_for_characterization(monkeypatch):
     
     # Mock characterize to succeed
     char_called = [False]
-    def mock_char(model_id, margin_gb=None, allow_min_probe=True):
+    def mock_char(model_id, margin_gb=None, allow_min_probe=True, console=None):
         char_called[0] = True
         return {"refused": False}
     monkeypatch.setattr("wmx_suite.probe.characterize", mock_char)

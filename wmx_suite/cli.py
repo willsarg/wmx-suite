@@ -338,7 +338,8 @@ def cmd_show(args):
 def cmd_characterize(args):
     margin = _configured_margin(args.margin)
     probe.characterize(models.resolve_hf_id(args.hf_id), margin_gb=margin,
-                       allow_min_probe=args.min_probe, repeats=args.repeats)
+                       allow_min_probe=args.min_probe, repeats=args.repeats,
+                       console=args.console)
 
 
 def cmd_calibrate(args):
@@ -1281,7 +1282,10 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
             if ans in ("y", "yes"):
                 print(f"[run] Running characterization for {model_id}...", file=sys.stderr)
                 try:
-                    probe.characterize(model_id, margin_gb=margin_gb, allow_min_probe=True)
+                    probe.characterize(
+                        model_id, margin_gb=margin_gb, allow_min_probe=True,
+                        console=Console(color=CONSOLE.color, verbose=CONSOLE.verbose,
+                                        stream=sys.stderr))
                     # Re-plan with the newly saved fit
                     p = launcher.plan(model_id, margin_gb=margin_gb)
                     if p.get("error"):

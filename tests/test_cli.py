@@ -343,7 +343,7 @@ def test_characterize_uses_environment_margin(monkeypatch):
     seen = {}
     monkeypatch.setenv(config.MARGIN_ENV, "3")
 
-    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats):
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, console=None):
         seen.update(
             hf_id=hf_id,
             margin_gb=margin_gb,
@@ -353,7 +353,7 @@ def test_characterize_uses_environment_margin(monkeypatch):
 
     monkeypatch.setattr(cli.probe, "characterize", characterize)
     cli.cmd_characterize(
-        SimpleNamespace(
+        _ns(
             hf_id="mlx-community/test",
             margin=None,
             min_probe=False,
