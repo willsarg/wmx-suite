@@ -42,10 +42,11 @@ def _default_event(_event: dict) -> None:
     pass
 
 
-def _fit_ab(points: list[tuple[float, float, float]]) -> tuple[float, float]:
+def _fit_ab(points: list[tuple[float, float, float]]) -> tuple[float, float] | None:
     """Least-squares delta = a*x1 + b*x2 through the origin (no intercept).
 
-    points: (x1=batch*seq, x2=batch*seq^2, delta). Returns (a, b); (0,0) if singular.
+    points: (x1=batch*seq, x2=batch*seq^2, delta). Returns (a, b), or None if the
+    system is singular (e.g. all points at a single seq → collinear features).
     """
     s11 = s12 = s22 = sd1 = sd2 = 0.0
     for x1, x2, d in points:
@@ -56,19 +57,34 @@ def _fit_ab(points: list[tuple[float, float, float]]) -> tuple[float, float]:
         sd2 += x2 * d
     det = s11 * s22 - s12 * s12
     if abs(det) < 1e-30:
-        return 0.0, 0.0
+        return None
     a = (sd1 * s22 - sd2 * s12) / det
     b = (s11 * sd2 - s12 * sd1) / det
     return a, b
 
 
 def _coeffs(points: list[tuple[float, float, float]]) -> tuple[float, float]:
-    """Gate coefficients (a, b): cold over-estimate before MIN_FIT_POINTS, else fit
-    clamped to the one-layer physical floor."""
+    """Gate coefficients (a, b). Cold over-estimate before MIN_FIT_POINTS or when the fit
+    is singular (degenerate grid); otherwise the fit clamped to the one-layer physical
+    floor. The cold over-estimate — not the floor — is the safe fallback when we can't
+    trust a fit, so a degenerate grid never under-predicts."""
     if len(points) < MIN_FIT_POINTS:
         return A_COLD, B_COLD
-    a_fit, b_fit = _fit_ab(points)
-    return max(A_FLOOR, max(0.0, a_fit)), max(B_FLOOR, max(0.0, b_fit))
+    fit = _fit_ab(points)
+    if fit is None:
+        return A_COLD, B_COLD
+    a_fit, b_fit = fit
+    return max(A_FLOOR, a_fit), max(B_FLOOR, b_fit)
+
+
+def _estimate_model_base(points: list[tuple[float, float, float]], a: float, b: float) -> float:
+    """Conservative fixed-overhead (weights-resident) estimate: the largest per-cell
+    residual after removing the fitted compute terms, floored at the seed. Recomputed each
+    iteration so it tracks the true residency rather than being frozen at the first cell."""
+    est = MODEL_BASE_SEED_GB
+    for x1, x2, d in points:
+        est = max(est, d - (a * x1 + b * x2))
+    return est
 
 
 def _run_cell(py: str, model: str, batch: int, seq: int, repeats: int, margin: float) -> dict:
@@ -85,6 +101,22 @@ def _run_cell(py: str, model: str, batch: int, seq: int, repeats: int, margin: f
 
 def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 3,
           margin_gb: float | None = None, *, on_event=None, persist: bool = True) -> dict:
+    """Run the batch x seq memory-surface sweep, gating each cell before it is spawned.
+
+    Args:
+        con: open DB connection (or None when persist is False, e.g. in tests).
+        run_id: id from db.start_embeddings_run; measurements are stored under it.
+        model: HF model id passed to the worker.
+        batches, seqs: grid axes (default DEFAULT_BATCHES / DEFAULT_SEQS); seqs is sorted.
+        repeats: forward passes per cell (passed to the worker).
+        margin_gb: safety cushion; resolved via config.margin_gb.
+        on_event: optional callback invoked with one dict per event —
+            {"event": "cell_done"|"row_skipped"|"error"|"preflight_abort", ...}.
+        persist: when True and con is not None, each cell is written to the DB.
+
+    Returns a summary dict: model, run_id, n_cells_measured, n_cells_skipped
+    (plus "aborted"/"error" keys when the sweep stops early).
+    """
     batches = batches or DEFAULT_BATCHES
     seqs = sorted(seqs or DEFAULT_SEQS)
     margin = config.margin_gb(margin_gb)
@@ -120,6 +152,7 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
 
             live_base = sample_settled_baseline()
             a, b = _coeffs(points)
+            model_base = _estimate_model_base(points, a, b)
             x1, x2 = batch * seq, batch * seq * seq
             predicted = live_base + model_base + PRED_SAFETY * (a * x1 + b * x2)
             if predicted >= threshold:
@@ -139,9 +172,6 @@ def sweep(con, run_id: int, model: str, batches=None, seqs=None, repeats: int = 
 
             delta = max(0.0, result["os_wired_gb"] - live_base)
             points.append((x1, x2, delta))
-            if n_measured == 0:
-                model_base = max(MODEL_BASE_SEED_GB,
-                                 result["os_wired_gb"] - live_base - (a * x1 + b * x2))
             n_measured += 1
 
             if persist and con is not None:

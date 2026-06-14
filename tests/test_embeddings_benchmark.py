@@ -221,5 +221,7 @@ def test_monotonic_pruning_skips_larger_batch_same_seq(monkeypatch):
     ep.sweep(con=None, run_id=1, model="m",
              batches=[1, 32], seqs=[2048, 8192], repeats=1, margin_gb=2.0,
              on_event=events.append, persist=False)
-    if (1, 8192) not in spawned:
-        assert (32, 8192) not in spawned
+    # The worst cell (largest batch AND largest seq) must never be spawned given the
+    # strong quadratic signal; and (1, 8192) being unsafe implies (32, 8192) is too.
+    assert (32, 8192) not in spawned
+    assert (1, 8192) not in spawned
