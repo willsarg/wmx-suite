@@ -4,6 +4,26 @@ from wmx_suite import db, models, probe
 from wmx_suite.system import SystemLimits
 
 
+def test_summarize_worker_error_param_mismatch():
+    err = ("Traceback (most recent call last):\n  ...\n"
+           "ValueError: Received 126 parameters not in model: "
+           "language_model.model.layers.41.self_attn.v_proj.weight.")
+    s = probe._summarize_worker_error(err)
+    assert "126 weight tensors" in s
+    assert "OptiQ" in s
+    assert "v_proj.weight" not in s  # no raw weight-name dump
+
+
+def test_summarize_worker_error_generic_uses_last_line():
+    s = probe._summarize_worker_error("Traceback\nRuntimeError: something broke")
+    assert s.startswith("load failed")
+    assert "something broke" in s
+
+
+def test_summarize_worker_error_empty():
+    assert "no result" in probe._summarize_worker_error("")
+
+
 def _model_info(
     weights_gb: float = 8.0,
     is_causal: bool = True,

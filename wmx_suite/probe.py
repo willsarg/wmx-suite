@@ -17,6 +17,7 @@ Strategy:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import statistics
 import subprocess
@@ -89,19 +90,31 @@ def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, *, verbose, log) -> dict
     line = next((l for l in out.stdout.splitlines() if l.startswith("{")), None)
     if not line:
         if verbose:
-            err = out.stderr.strip()
-            # The useful part of a load failure (e.g. "Received N parameters not
-            # in model: ...") sits at the END of the traceback, so keep a long
-            # tail — 200 chars truncated it to an undiagnosable weight-name list.
-            tail = err[-1500:]
-            hint = ""
-            if "not in model" in err:
-                hint = ("  [hint: this checkpoint carries weights this mlx_lm "
-                        "version's architecture doesn't expect — try a different "
-                        "build/quant (e.g. an -OptiQ- variant) or upgrade mlx_lm]")
-            log(f"# {ctx}: no result (stderr tail: {tail}){hint}")
+            log(f"# {ctx}: {_summarize_worker_error(out.stderr)}")
         return None
     return json.loads(line)
+
+
+def _summarize_worker_error(stderr: str) -> str:
+    """Turn a worker's raw traceback into one human-readable line.
+
+    A model-load failure can dump thousands of characters of weight-key names;
+    we extract the headline instead of echoing the whole list.
+    """
+    err = (stderr or "").strip()
+    if not err:
+        return "no result (worker produced no output)"
+    # Checkpoint/architecture mismatch (e.g. some gemma-4 4-bit builds carry
+    # weights for kv-shared layers that this mlx_lm version doesn't define).
+    m = re.search(r"(\d+)\s+parameters not in model", err)
+    if m:
+        return (f"load failed — this checkpoint has {m.group(1)} weight tensors "
+                f"that your installed mlx_lm doesn't expect (a quant/build "
+                f"mismatch). Try a different build (e.g. an -OptiQ- variant) or "
+                f"upgrade mlx_lm.")
+    # Otherwise show the exception summary (last non-empty traceback line), capped.
+    last = next((ln.strip() for ln in reversed(err.splitlines()) if ln.strip()), "")
+    return f"load failed — {last[:200]}" if last else "no result"
 
 
 def _measure_rung(py: str, hf_id: str, ctx: int, kv_bits, repeats: int, *, verbose, log):
