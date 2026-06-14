@@ -105,7 +105,8 @@ def _coeffs(points: list[tuple[float, float, float]],
     """Raw gate coefficients (c, a, b), before floors/clamps. Priority:
       1. in-run 3-param fit once we have >= MIN_FIT_POINTS points (ground truth for the
          current machine state),
-      2. a stored calibration profile (seeds the early cells),
+      2. a stored calibration profile (seeds the early cells, and also used if the in-run
+         fit is singular),
       3. the cold sum-over-layers OVER-estimate (safe fallback when we can't trust a fit).
     """
     if len(points) >= MIN_FIT_POINTS:
@@ -114,6 +115,8 @@ def _coeffs(points: list[tuple[float, float, float]],
             return fit
     if stored is not None:
         return stored
+    # Cold intercept is 0.0: fixed residency is supplied separately by MODEL_BASE_SEED_GB
+    # (the model_base clamp in sweep), not modeled here.
     return (0.0, A_COLD, B_COLD)
 
 

@@ -398,13 +398,14 @@ def test_intercept_gate_measures_previously_skipped_safe_cells(monkeypatch):
              on_event=events.append, persist=False)
     measured = {(e["batch"], e["seq"]) for e in events if e["event"] == "cell_done"}
     skipped = {(e["batch"], e["seq"]) for e in events if e["event"] == "row_skipped"}
-    assert (8, 4096) in measured       # was wrongly skipped before the intercept fix
-    assert (32, 2048) in measured      # ditto
-    assert (32, 8192) not in measured  # true danger corner: still never measured
-    # (32, 8192) is implicitly protected: the row breaks at (32, 4096) which is predicted
-    # unsafe, so 8192 is never reached (no event emitted); the explicit skipped set covers
-    # earlier batches that hit 8192 via the monotonic-pruning path.
-    assert (32, 4096) in skipped       # the actual skip boundary for batch=32
+    # Cells the OLD through-origin gate wrongly skipped are now measured:
+    assert (8, 4096) in measured       # old gate predicted 18.27 GB
+    assert (32, 2048) in measured      # old gate predicted 15.33 GB
+    assert (1, 8192) in measured       # old gate predicted 16.39 GB
+    # The danger boundary still fires: batch=32 breaks at seq=4096 (predicted over wall),
+    # so (32, 4096) is skipped and the larger (32, 8192) is never even reached/measured.
+    assert (32, 4096) in skipped
+    assert (32, 8192) not in measured
 
 
 def test_model_base_clamped_to_seed_on_negative_intercept(monkeypatch):
