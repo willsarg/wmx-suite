@@ -79,6 +79,13 @@ def test_from_args_color_false_when_no_color_env(monkeypatch):
     assert con.color is False
 
 
+def test_from_args_color_false_when_no_color_env_empty(monkeypatch):
+    # no-color.org: presence disables color regardless of value (NO_COLOR=)
+    monkeypatch.setenv("NO_COLOR", "")
+    con = Console.from_args(stream=FakeStream(tty=True), no_color=False)
+    assert con.color is False
+
+
 def test_from_args_verbose_passthrough(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     con = Console.from_args(stream=FakeStream(tty=True), verbose=True)
@@ -91,8 +98,8 @@ def test_from_args_verbose_passthrough(monkeypatch):
 def test_field_shape_plain():
     con = Console(color=False, verbose=False)
     out = con.field("device", "Apple M4 Pro")
-    # label padded, then " : ", then value
-    assert out == "device           : Apple M4 Pro"
+    # 16-wide label, then ": " (colon at a fixed column), then value
+    assert out == "device          : Apple M4 Pro"
 
 
 def test_field_gloss_appended():
@@ -250,8 +257,8 @@ def test_plain_mode_golden():
     out = "\n".join(parts)
     expected = (
         "memory budget\n"
-        "total RAM        : 25.77 GB   physical memory installed\n"
-        "  safe budget    : 15.18 GB\n"
+        "total RAM       : 25.77 GB   physical memory installed\n"
+        "  safe budget   : 15.18 GB\n"
         "\nnext\n"
         "  wmx-suite health   which models can run now"
     )

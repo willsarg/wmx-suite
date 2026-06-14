@@ -1210,10 +1210,10 @@ def _build_global_parser() -> argparse.ArgumentParser:
     return g
 
 
-def _main_argparse(argv=None):
+def _build_parser() -> argparse.ArgumentParser:
     gp = _build_global_parser()
     ap = argparse.ArgumentParser(prog="wmx-suite")
-    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=lambda **kw:
+    sub = ap.add_subparsers(dest="cmd", required=False, parser_class=lambda **kw:
                             argparse.ArgumentParser(parents=[gp], **kw))
     sub.add_parser("system").set_defaults(func=cmd_system)
     p = sub.add_parser("health")
@@ -1335,7 +1335,11 @@ def _main_argparse(argv=None):
     p.add_argument("--ignore-profile", action="store_true",
                    help="ignore any stored calibration profile (cold start); still re-fits")
     p.set_defaults(func=cmd_benchmark_embeddings)
+    return ap
 
+
+def _main_argparse(argv=None):
+    ap = _build_parser()
     args = ap.parse_args(argv)
     args.console = Console.from_args(
         no_color=getattr(args, "no_color", False),
@@ -1363,6 +1367,16 @@ def _strip_global_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
     return remaining, verbose, no_color
 
 
+def cmd_landing(console: Console) -> None:
+    """Front door: shown for `wmx-suite` with no subcommand.
+
+    Placeholder until Phase 2's ``render_landing`` — for now it prints the
+    command overview so a bare invocation is helpful instead of an argparse
+    error. ``console`` carries the --verbose/--no-color policy.
+    """
+    _build_parser().print_help(console.stream)
+
+
 def main():
     argv = sys.argv[1:]
     if argv and argv[0] == "run":
@@ -1372,6 +1386,11 @@ def main():
         global CONSOLE
         CONSOLE = Console.from_args(no_color=no_color, verbose=verbose)
         return cmd_run_raw(run_args)
+    # Front door: no subcommand present (empty, or only global/help flags).
+    rest, verbose, no_color = _strip_global_flags(argv)
+    if not rest or rest[0] in ("-h", "--help"):
+        console = Console.from_args(no_color=no_color, verbose=verbose)
+        return cmd_landing(console)
     return _main_argparse(argv)
 
 

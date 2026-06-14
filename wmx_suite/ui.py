@@ -53,7 +53,9 @@ class Console:
                   verbose: bool = False) -> "Console":
         stream = stream if stream is not None else sys.stdout
         is_tty = bool(getattr(stream, "isatty", lambda: False)())
-        color = is_tty and not no_color and not os.environ.get("NO_COLOR")
+        # NO_COLOR convention: disabled when the var is PRESENT, regardless of
+        # value (including empty string). https://no-color.org
+        color = is_tty and not no_color and "NO_COLOR" not in os.environ
         return cls(color=color, verbose=verbose, stream=stream)
 
     # ------------------------------------------------------------------ #
@@ -79,7 +81,8 @@ class Console:
         pad = max(0, LABEL_WIDTH - indent)
         lbl = (" " * indent) + self.style("label", f"{label:<{pad}}")
         val = self.style(value_role, value)
-        line = f"{lbl} : {val}"
+        # Mockup form: 16-wide label, then ": " (colon at a fixed column).
+        line = f"{lbl}: {val}"
         if gloss:
             line += GLOSS_GAP + self.style("gloss", gloss)
         return line

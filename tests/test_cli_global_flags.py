@@ -76,3 +76,36 @@ def test_strip_global_flags_helper():
     assert rem == ["--model", "X", "--prompt", "hi"]
     assert verbose is True
     assert no_color is False
+
+
+# --------------------------------------------------------------------------- #
+# Front door (no subcommand) — Phase 1.5
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("argv,want_verbose", [
+    ([], False),
+    (["--verbose"], True),
+    (["-v"], True),
+    (["--help"], False),
+    (["-h"], False),
+    (["--no-color"], False),
+])
+def test_bare_invocation_reaches_landing(monkeypatch, argv, want_verbose):
+    captured = {}
+    monkeypatch.setattr(cli, "cmd_landing",
+                        lambda console: captured.update(console=console))
+    monkeypatch.setattr(cli.sys, "argv", ["wmx-suite", *argv])
+    cli.main()  # must NOT raise (no argparse "required: cmd" error)
+    console = captured["console"]
+    assert isinstance(console, Console)
+    assert console.verbose is want_verbose
+
+
+def test_subcommand_does_not_trigger_landing(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli, "cmd_landing",
+                        lambda console: captured.update(landed=True))
+    monkeypatch.setattr(cli, "cmd_system", lambda a: captured.update(ran=True))
+    monkeypatch.setattr(cli.sys, "argv", ["wmx-suite", "system"])
+    cli.main()
+    assert captured.get("ran") is True
+    assert "landed" not in captured

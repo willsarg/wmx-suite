@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>wmx-suite — CLI output mockup</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --term-bg: #0a0e14;
+    --border: #30363d;
+    --fg: #c9d1d9;
+    --dim: #8b949e;
+    --dimmer: #6e7681;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --cyan: #56d4dd;
+    --blue: #58a6ff;
+    --accent: #d2a8ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  header {
+    padding: 24px 32px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 650; }
+  header p { margin: 0; color: var(--dim); font-size: 13px; }
+  .wrap { padding: 20px 32px 64px; max-width: 1500px; margin: 0 auto; }
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    align-items: center;
+    margin: 16px 0 24px;
+    padding: 14px 18px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .group { display: flex; align-items: center; gap: 8px; }
+  .group > .label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin-right: 2px; }
+  .seg { display: inline-flex; background: #0d1117; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    background: transparent; color: var(--dim); border: 0; padding: 6px 14px;
+    font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  .seg button:hover { color: var(--fg); }
+  .seg button.active { background: var(--blue); color: #04121f; font-weight: 600; }
+
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } }
+
+  .term {
+    background: var(--term-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  .term .bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; background: #11161d; border-bottom: 1px solid var(--border);
+  }
+  .term .bar .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.r { background: #ff5f56; } .dot.y { background: #ffbd2e; } .dot.g { background: #27c93f; }
+  .term .bar .title { margin-left: 8px; color: var(--dimmer); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .term pre {
+    margin: 0; padding: 18px 20px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13.5px; line-height: 1.65; white-space: pre; overflow-x: auto;
+    color: var(--fg);
+  }
+  .caption { color: var(--dim); font-size: 12px; margin: 8px 2px 0; }
+
+  /* ANSI-ish */
+  .g { color: var(--green); } .r { color: var(--red); } .y { color: var(--yellow); }
+  .c { color: var(--cyan); } .b { color: var(--blue); } .a { color: var(--accent); }
+  .dim { color: var(--dim); } .dimmer { color: var(--dimmer); }
+  .lbl { color: var(--dim); }            /* field labels */
+  .val { color: var(--fg); font-weight: 600; }
+  .gloss { color: var(--dimmer); }       /* inline explanation */
+  .hdr { color: var(--cyan); }           /* table headers / section titles */
+  .prompt { color: var(--green); }
+  .cmd { color: var(--fg); }
+
+  .note { color: var(--dim); font-size: 13px; margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--border); }
+  .note code { background: var(--panel); padding: 1px 5px; border-radius: 4px; color: var(--accent); }
+  h2.sec { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>wmx-suite — CLI output readability mockup</h1>
+  <p>Real numbers from the M4 Pro testbed. Flip the toggles to compare. Nothing here ships yet — it's a sketchpad.</p>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <div class="group">
+      <span class="label">Version</span>
+      <div class="seg" id="seg-version">
+        <button data-v="current">Current</button>
+        <button data-v="proposed" class="active">Proposed</button>
+      </div>
+    </div>
+    <div class="group" id="verbosity-group">
+      <span class="label">Detail</span>
+      <div class="seg" id="seg-verbosity">
+        <button data-vb="normal" class="active">Normal</button>
+        <button data-vb="verbose">Verbose&nbsp;(--verbose)</button>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-bottom:24px">
+    <h2 class="sec">wmx-suite  (no args / --help)  — the front door</h2>
+    <div class="term">
+      <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite</span></div>
+      <pre id="out-landing"></pre>
+    </div>
+    <p class="caption">“I just installed this. Now what?” — the first thing a human sees.</p>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h2 class="sec">wmx-suite system</h2>
+      <div class="term">
+        <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite system</span></div>
+        <pre id="out-system"></pre>
+      </div>
+      <p class="caption">“What is my machine, and how much can it safely give a model?”</p>
+    </div>
+
+    <div>
+      <h2 class="sec">wmx-suite health</h2>
+      <div class="term">
+        <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite health</span></div>
+        <pre id="out-health"></pre>
+      </div>
+      <p class="caption">“Right now, which models can I actually run — and how big a context?”</p>
+    </div>
+  </div>
+
+  <div class="cols" style="margin-top:24px">
+    <div>
+      <h2 class="sec">wmx-suite scan</h2>
+      <div class="term">
+        <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite scan</span></div>
+        <pre id="out-scan"></pre>
+      </div>
+      <p class="caption">“What models do I already have?”</p>
+    </div>
+    <div>
+      <h2 class="sec">wmx-suite show &lt;model&gt;</h2>
+      <div class="term">
+        <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite show</span></div>
+        <pre id="out-show"></pre>
+      </div>
+      <p class="caption">“Tell me about this one model.”</p>
+    </div>
+  </div>
+
+  <div style="margin-top:24px">
+    <h2 class="sec">wmx-suite list</h2>
+    <div class="term">
+      <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite list</span></div>
+      <pre id="out-list"></pre>
+    </div>
+    <p class="caption">“Which models have I measured, and how big can each run?”</p>
+  </div>
+
+  <div class="cols" style="margin-top:24px">
+    <div>
+      <h2 class="sec">wmx-suite run — refusal (RULE #1)</h2>
+      <div class="term">
+        <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite run · refused</span></div>
+        <pre id="out-refusal"></pre>
+      </div>
+      <p class="caption">The safety-meets-UX moment: a “no” that teaches instead of scares.</p>
+    </div>
+    <div>
+      <h2 class="sec">error — model not in cache</h2>
+      <div class="term">
+        <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">wmx-suite show · error</span></div>
+        <pre id="out-notfound"></pre>
+      </div>
+      <p class="caption">Every dead-end should hand you the next step.</p>
+    </div>
+  </div>
+
+  <p class="note">
+    Edit the <code>RENDER</code> functions in this file to iterate on wording/layout, refresh, and eyeball it.
+    Once we like a version, I'll port the exact strings into <code>cmd_system</code> / <code>cmd_health</code> in <code>wmx_suite/cli.py</code>.
+  </p>
+</div>
+
+<script>
+/* ---- helpers to build colored terminal lines --------------------------- */
+const E = (cls, txt) => `<span class="${cls}">${txt}</span>`;
+const pad = (s, n) => (s + " ".repeat(Math.max(0, n - s.length)));   // left-align
+const padl = (s, n) => (" ".repeat(Math.max(0, n - s.length)) + s);  // right-align
+
+/* field row: label : value   gloss */
+function field(label, value, gloss, opts = {}) {
+  const L = pad(label, 16);
+  const v = E(opts.valCls || "val", value);
+  const g = gloss ? "   " + E("gloss", gloss) : "";
+  return `${E("lbl", L)}: ${v}${g}`;
+}
+
+/* "next" footer: suggested follow-up commands with a one-line gloss */
+function nextBlock(cmds, gloss) {
+  const w = Math.max(...cmds.map(c => c.cmd.length));
+  const lines = [E("hdr", "next")];
+  for (const c of cmds) {
+    const cmd = E("a", pad(c.cmd, w));
+    const g = gloss ? "   " + E("gloss", c.why) : "";
+    lines.push("  " + cmd + g);
+  }
+  return "\n" + lines.join("\n");
+}
+
+/* =======================================================================
+   LANDING  (wmx-suite  with no args / --help)
+   ===================================================================== */
+function renderLandingCurrent() {
+  return [
+    E("r","usage: wmx-suite [-h]"),
+    E("r","                 {system,health,scan,show,characterize,list,calibrate,web,run,"),
+    E("r","                  benchmark-kokoro,benchmark-kokoro-ttfa,benchmark-kokoro-batch,"),
+    E("r","                  benchmark-kokoro-voice,benchmark-kokoro-cache,"),
+    E("r","                  benchmark-kokoro-baseline,benchmark-embeddings}"),
+    E("r","                 ..."),
+    E("r","wmx-suite: error: the following arguments are required: cmd"),
+  ].join("\n");
+}
+
+function renderLandingProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const cmd = (name, why) => "  " + E("a", pad(name, 22)) + (gloss ? E("gloss", why) : "");
+  const L = [];
+  L.push(E("a","  wmx-suite") + E("dim","  —  run local MLX models on Apple Silicon without crashing your Mac"));
+  L.push("");
+  L.push(E("dim","  this machine: ") + E("c","Apple M4 Pro") + E("dim"," · ") +
+         E("g","12.04 GB free") + E("dim"," of a ") + E("g","15.18 GB") + E("dim"," safe budget · ") +
+         E("g","3 models ready") + E("dim"," · ") + E("g","calibrated"));
+  L.push("");
+
+  if (gloss) {
+    L.push(E("hdr","  NEW HERE?  ") + E("dim","first time on this machine, run these in order:"));
+    L.push("     " + E("a","1) wmx-suite scan") + E("gloss","         find MLX models already in your HF cache"));
+    L.push("     " + E("a","2) wmx-suite characterize <m>") + E("gloss","  measure a model's safe context ceiling"));
+    L.push("     " + E("a","3) wmx-suite run --model <m>") + E("gloss","   launch it safely (auto KV-bits + context cap)"));
+    L.push("");
+  }
+
+  L.push(E("hdr","  YOUR MACHINE"));
+  L.push(cmd("system", "specs + memory budget (what your Mac can safely give a model)"));
+  L.push(cmd("health", "live go/no-go: which models can run right now, and how big"));
+  L.push("");
+  L.push(E("hdr","  MODELS"));
+  L.push(cmd("scan", "register mlx-community models found in your HF cache"));
+  L.push(cmd("show <model>", "architecture + KV-cache memory class for one model"));
+  L.push(cmd("characterize <model>", "safely measure a model's max safe context"));
+  L.push(cmd("list", "show measured ceilings stored for this machine"));
+  L.push(cmd("calibrate", "tune this machine's cold-start memory estimate"));
+  L.push("");
+  L.push(E("hdr","  RUN"));
+  L.push(cmd("run --model <model>", "safe launch — refuses anything that would crash the Mac"));
+  L.push(cmd("web", "browser dashboard for all of the above"));
+  L.push("");
+  if (verbose) {
+    L.push(E("hdr","  BENCHMARKS") + E("dim","  (power users)"));
+    L.push(cmd("benchmark-kokoro", "Kokoro TTS throughput (RTF / chars-per-sec) vs length"));
+    L.push(cmd("benchmark-kokoro-ttfa", "streaming time-to-first-audio latency"));
+    L.push(cmd("benchmark-kokoro-batch", "concurrency vs throughput & peak memory"));
+    L.push(cmd("benchmark-kokoro-voice", "voice-switch cost (warm vs cold load)"));
+    L.push(cmd("benchmark-kokoro-cache", "voice-cache memory overhead"));
+    L.push(cmd("benchmark-kokoro-baseline", "idle synthesis memory floor"));
+    L.push(cmd("benchmark-embeddings", "ModernBERT memory surface (batch x sequence)"));
+  } else {
+    L.push(E("dim","  benchmarks (TTS / embeddings, for power users): ") + E("a","wmx-suite benchmark-* --help"));
+  }
+  L.push("");
+  L.push(E("dim","  details on any command:  ") + E("a","wmx-suite <command> --help") +
+         (verbose ? "" : E("dim","   ·   everything at once:  ") + E("a","wmx-suite --verbose")));
+  return L.join("\n");
+}
+
+/* =======================================================================
+   SYSTEM
+   ===================================================================== */
+function renderSystemCurrent() {
+  return [
+    `device              : Apple M4 Pro`,
+    `total RAM           : 25.77 GB`,
+    `crash wall          : 17.18 GB  (max_recommended_working_set_size)`,
+    `max single buffer   : 12.88 GB`,
+    `swap free           : 1.13 GB`,
+    `wired now (baseline): 3.14 GB`,
+    `safe threshold       : 15.18 GB  (wall − 2GB margin)`,
+    `calibration profile : overhead 1.00 GB (model mlx-community/Qwen2.5-VL-7B-Instruct-4bit, 2026-06-14T17:41:59+00:00)`,
+  ].join("\n");
+}
+
+function renderSystemProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const L = [];
+  L.push(field("device", "Apple M4 Pro", null));
+  L.push("");
+  L.push(E("hdr", "memory budget") + (gloss ? "" : ""));
+  L.push(field("total RAM", "25.77 GB", gloss ? "physical memory installed" : null));
+  L.push(field("crash wall", E("y","17.18 GB"), gloss ? "most the GPU can safely lock — past this the Mac can hard-lock" : null, {valCls:"y"}));
+  L.push(field("  safe budget", E("g","15.18 GB"), gloss ? "crash wall − 2 GB margin — the suite never plans above this" : null, {valCls:"g"}));
+  L.push(field("wired now", "3.14 GB", gloss ? "memory locked right now (your starting point)" : null));
+  L.push(field("free headroom", E("c","12.04 GB"), gloss ? "safe budget − wired now → what a model may use" : null, {valCls:"c"}));
+  L.push("");
+  L.push(E("hdr", "details"));
+  L.push(field("max GPU buffer", "12.88 GB", gloss ? "largest single allocation Metal allows" : null));
+  L.push(field("swap free", E("y","1.13 GB") + "  " + E("y","⚠ tiny"), gloss ? "almost no fallback if you cross the wall" : null, {valCls:"y"}));
+  L.push(field("calibration", E("g","tuned"), gloss ? "this machine's cold-start overhead is measured (Qwen2.5-VL-7B, 2026-06-14)" : "Qwen2.5-VL-7B · 2026-06-14", {valCls:"g"}));
+
+  if (verbose) {
+    L.push("");
+    L.push(E("hdr","raw (--verbose)"));
+    L.push(field("  wall source", "max_recommended_working_set_size", null, {valCls:"dim"}));
+    L.push(field("  wall bytes", "18,446,744,073 B", null, {valCls:"dim"}));
+    L.push(field("  margin", "2.00 GB", "from default (set WMX_SUITE_MARGIN_GB or --margin)", {valCls:"dim"}));
+    L.push(field("  cold-start", "overhead 1.00 GB", "Qwen2.5-VL-7B-Instruct-4bit @ 2026-06-14T17:41:59Z", {valCls:"dim"}));
+    L.push(field("  wired sample", "median of 3 @ 0.2s", "vm_stat 'Pages wired down'", {valCls:"dim"}));
+  }
+  let out = L.join("\n");
+  out += "\n" + nextBlock([
+    {cmd:"wmx-suite health",     why:"which of your models can run right now, and how big a context"},
+    {cmd:"wmx-suite list",       why:"safe context ceilings already measured on this machine"},
+    {cmd:"wmx-suite calibrate",  why:"re-tune this machine's cold-start estimate"},
+  ], gloss);
+  return out;
+}
+
+/* =======================================================================
+   HEALTH
+   ===================================================================== */
+function renderHealthCurrent() {
+  return [
+    `device              : Apple M4 Pro`,
+    `crash wall          : 17.18 GB`,
+    `safe threshold      : 15.18 GB  (wall − 2GB margin)`,
+    `swap free           : 1.13 GB   ` + E("y","⚠ low — crossing the wall may hard-lock"),
+    `wired now           : 3.14 GB`,
+    `free headroom       : 12.04 GB  (threshold − wired now)`,
+    ``,
+    `characterized models — can it load & run safely now?`,
+    `  ` + E("g","✓") + `  mlx-community/Qwen2.5-VL-7B-Instruct-4bit  base  8.10GB    +7.08GB  safe≈26,439 ctx`,
+    `  ` + E("g","✓") + `  mlx-community/Qwen3.5-9B-OptiQ-4bit        base 12.19GB    +2.99GB  safe≈36,495 ctx`,
+    `  ` + E("g","✓") + `  mlx-community/gemma-4-e4b-it-OptiQ-4bit    base 10.85GB    +4.33GB  safe≈62,048 ctx`,
+    `  ` + E("r","✗") + `  mlx-community/gpt-oss-20b-MXFP4-Q8         base 15.58GB    -0.40GB  ` + E("r","safe≈0 ctx (too small)"),
+  ].join("\n");
+}
+
+function renderHealthProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const rows = [
+    {ok:true,  name:"Qwen2.5-VL-7B-Instruct-4bit", loads:"8.10 GB",  spare:"+7.08 GB", ctx:"~26,400 tokens", base:"8.10", slope:"0.2678", cap:"26,439"},
+    {ok:true,  name:"Qwen3.5-9B-OptiQ-4bit",       loads:"12.19 GB", spare:"+2.99 GB", ctx:"~36,500 tokens", base:"12.19", slope:"0.0820", cap:"36,495"},
+    {ok:true,  name:"gemma-4-e4b-it-OptiQ-4bit",   loads:"10.85 GB", spare:"+4.33 GB", ctx:"~62,000 tokens", base:"10.85", slope:"0.0698", cap:"62,048"},
+    {ok:false, name:"gpt-oss-20b-MXFP4-Q8",        loads:"15.58 GB", spare:"−0.40 GB", ctx:"over budget — won't load", base:"15.58", slope:"0.3600", cap:"0"},
+  ];
+  const wName = Math.max(...rows.map(r => r.name.length), "model".length);
+
+  const L = [];
+  L.push(E("hdr","Can each model load and run safely right now?"));
+  L.push("");
+  if (gloss) {
+    L.push(field("crash wall", E("y","17.18 GB"), "cross it and the Mac can hard-lock", {valCls:"y"}));
+    L.push(field("safe budget", E("g","15.18 GB"), "crash wall − 2 GB margin (the planning ceiling)", {valCls:"g"}));
+    L.push(field("free now", E("c","12.04 GB"), "safe budget − memory already wired", {valCls:"c"}));
+    L.push(field("swap free", E("y","1.13 GB") + " " + E("y","⚠ tiny"), "almost no fallback if you cross the wall", {valCls:"y"}));
+  } else {
+    L.push(E("dim", `crash wall ${E("y","17.18 GB")}` + E("dim",`  ·  safe budget `) + `${E("g","15.18 GB")}` + E("dim",`  ·  free now `) + `${E("c","12.04 GB")}` + E("dim",`  ·  swap `) + `${E("y","1.13 GB ⚠")}`));
+  }
+  L.push("");
+  // header row
+  L.push(E("hdr","   " + pad("", 2) + " " + pad("model", wName) + "   " + padl("loads at",9) + "   " + padl("spare room",10) + "   " + "safe context"));
+  for (const r of rows) {
+    const glyph = r.ok ? E("g","✓") : E("r","✗");
+    const nm = pad(r.name, wName);
+    const loads = padl(r.loads, 9);
+    const spare = padl(r.spare, 10);
+    const spareC = r.ok ? E("g", spare) : E("r", spare);
+    const ctx = r.ok ? r.ctx : E("r", r.ctx);
+    L.push(`   ${glyph}  ${nm}   ${loads}   ${spareC}   ${ctx}`);
+  }
+
+  if (verbose) {
+    L.push("");
+    L.push(E("hdr","raw (--verbose)") + E("dim","   margin 2.00 GB · baseline 3.14 GB (median of 3)"));
+    const vw = Math.max(...rows.map(r => r.name.length));
+    L.push(E("dim","  " + pad("model", vw) + "   " + padl("base GB",8) + "   " + padl("GB/1k",7) + "   " + padl("safe cap tok",12)));
+    for (const r of rows)
+      L.push(E("dim","  " + pad(r.name, vw) + "   " + padl(r.base,8) + "   " + padl(r.slope,7) + "   " + padl(r.cap,12)));
+  }
+  let out = L.join("\n");
+  out += "\n\n" + E("dim",
+    "  loads at     memory the model needs just to load (no context yet)\n" +
+    "  spare room   safe budget left after it loads — bigger is safer\n" +
+    "  safe context largest prompt+reply we can guarantee won't cross the wall");
+  out += "\n" + nextBlock([
+    {cmd:"wmx-suite show <model>",            why:"architecture + KV-cache memory class for one model"},
+    {cmd:"wmx-suite run --model <m> --dry-run", why:"preview the safe launch plan without running it"},
+    {cmd:"wmx-suite characterize <model>",    why:"measure the safe ceiling of a model not listed yet"},
+  ], gloss);
+  return out;
+}
+
+/* =======================================================================
+   SCAN
+   ===================================================================== */
+function renderScanCurrent() {
+  return [
+    `  mlx-community/Qwen2.5-VL-7B-Instruct-4bit                       5.0GB  quantizable`,
+    `  mlx-community/Qwen3.5-9B-OptiQ-4bit                             9.0GB  quantizable`,
+    `  mlx-community/gemma-4-e4b-it-OptiQ-4bit                         7.7GB  quantizable`,
+    `  mlx-community/gpt-oss-20b-MXFP4-Q8                             12.1GB  fp16-only (RotatingKVCache)`,
+    `registered 4 models`,
+  ].join("\n");
+}
+function renderScanProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const rows = [
+    {name:"Qwen2.5-VL-7B-Instruct-4bit", gb:"5.0 GB",  kv:"quantizable KV", cache:"KVCache", raw:"4.98 GB"},
+    {name:"Qwen3.5-9B-OptiQ-4bit",       gb:"9.0 GB",  kv:"quantizable KV", cache:"KVCache", raw:"9.01 GB"},
+    {name:"gemma-4-e4b-it-OptiQ-4bit",   gb:"7.7 GB",  kv:"quantizable KV", cache:"KVCache", raw:"7.68 GB"},
+    {name:"gpt-oss-20b-MXFP4-Q8",        gb:"12.1 GB", kv:"fp16-only KV (sliding-window cache)", cache:"RotatingKVCache", raw:"12.10 GB"},
+  ];
+  const w = Math.max(...rows.map(r => r.name.length));
+  const L = [E("hdr","Found these MLX models in your Hugging Face cache:"), ""];
+  for (const r of rows) {
+    let line = "  " + E("g","✓") + "  " + pad(r.name, w) + "   " + padl(r.gb,8) + "   " + E("dim", r.kv);
+    if (verbose) line += E("dim","   [" + r.cache + ", " + r.raw + "]");
+    L.push(line);
+  }
+  L.push("");
+  L.push(E("g","registered 4 models"));
+  if (gloss) L.push(E("dim","  quantizable KV   can compress its context cache to 4-bit → more context fits\n  fp16-only KV     cache must stay full precision → memory climbs faster"));
+  L.push(nextBlock([{cmd:"wmx-suite characterize <model>", why:"measure each one's safe context ceiling"}], gloss));
+  return L.join("\n");
+}
+
+/* =======================================================================
+   SHOW
+   ===================================================================== */
+function renderShowCurrent() {
+  return [
+    `  hf_id             : mlx-community/gpt-oss-20b-MXFP4-Q8`,
+    `  weights_gb        : 12.1`,
+    `  n_layers          : 24`,
+    `  growing_layers    : 12`,
+    `  kv_heads          : 8`,
+    `  head_dim          : 64`,
+    `  hidden_size       : 2880`,
+    `  max_context       : 131072`,
+    `  cache_type        : RotatingKVCache`,
+    `  can_quantize_kv   : False`,
+    `  layer_types       : {"sliding_attention": 12, "full_attention": 12}`,
+    `  max_kv_size_enforced: True`,
+    `  is_causal         : True`,
+    `  fp16 KV bytes/token: 24576 (~0.0246 GB per 1k tokens)`,
+  ].join("\n");
+}
+function renderShowProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const f = (l,v,g) => field(l, v, gloss ? g : null);
+  const L = [];
+  L.push(E("a","mlx-community/gpt-oss-20b-MXFP4-Q8"));
+  L.push("");
+  L.push(E("hdr","what it is"));
+  L.push(f("weights", "12.1 GB", "size it occupies just to load, before any context"));
+  L.push(f("layers", "24", "12 of them grow with context; the rest are fixed"));
+  L.push(f("max context", "131,072 tok", "architecture limit — NOT your safe limit (run characterize)"));
+  L.push("");
+  L.push(E("hdr","how its memory behaves"));
+  L.push(f("KV cache", E("y","sliding-window") + E("dim"," (RotatingKVCache)"), "this type can't be 4-bit compressed — it runs at fp16", {valCls:"y"}));
+  L.push(f("growth", "≈0.025 GB / 1k tok", "how fast memory climbs as the conversation grows (fp16)"));
+  if (verbose) {
+    L.push("");
+    L.push(E("hdr","raw architecture (--verbose)"));
+    const raw = [
+      ["n_layers","24"], ["growing_layers","12"], ["kv_heads","8"], ["head_dim","64"],
+      ["hidden_size","2880"], ["cache_type","RotatingKVCache"], ["can_quantize_kv","False"],
+      ["layer_types",'{"sliding_attention": 12, "full_attention": 12}'],
+      ["max_kv_size_enforced","True"], ["is_causal","True"], ["fp16 KV bytes/token","24576"],
+    ];
+    for (const [k,v] of raw) L.push(E("dim","  " + pad(k, 20) + " " + v));
+  }
+  L.push(nextBlock([
+    {cmd:"wmx-suite characterize <this>", why:"find its safe context ceiling on your Mac"},
+    {cmd:"wmx-suite run --model <this> --dry-run", why:"preview the launch plan"},
+  ], gloss));
+  return L.join("\n");
+}
+
+/* =======================================================================
+   LIST
+   ===================================================================== */
+function renderListCurrent() {
+  return [
+    `  mlx-community/Qwen2.5-VL-7B-Instruct-4bit      base=  5.0GB slope=0.2678  safe≈ 28,533  wall≈ 36,001  (R²=0.9925)  gen≈59.8 tok/s (n=2)`,
+    `  mlx-community/Qwen3.5-9B-OptiQ-4bit            base=  9.0GB slope=0.0820  safe≈ 47,638  wall≈ 72,035  (R²=0.9975)`,
+    `  mlx-community/gemma-4-e4b-it-OptiQ-4bit        base=  7.7GB slope=0.0698  safe≈ 74,851  wall≈103,524  (R²=0.999)  gen≈66.3 tok/s (n=1)`,
+    `  mlx-community/gpt-oss-20b-MXFP4-Q8             base= 12.4GB slope=0.3600  safe≈  1,420  wall≈  6,976  (R²=1.0)`,
+  ].join("\n");
+}
+function renderListProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const rows = [
+    {name:"Qwen2.5-VL-7B-Instruct-4bit", loads:"5.0 GB",  safe:"~28,500 tok", speed:"~60 tok/s", fit:"good", flag:"", slope:"0.2678", r2:"0.9925", wall:"36,001", n:"2"},
+    {name:"Qwen3.5-9B-OptiQ-4bit",       loads:"9.0 GB",  safe:"~47,600 tok", speed:"—",         fit:"good", flag:"", slope:"0.0820", r2:"0.9975", wall:"72,035", n:"0"},
+    {name:"gemma-4-e4b-it-OptiQ-4bit",   loads:"7.7 GB",  safe:"~74,900 tok", speed:"~66 tok/s", fit:"good", flag:"", slope:"0.0698", r2:"0.999",  wall:"103,524", n:"1"},
+    {name:"gpt-oss-20b-MXFP4-Q8",        loads:"12.4 GB", safe:"~1,400 tok",  speed:"—",         fit:"good", flag:"⚠ tight", slope:"0.3600", r2:"1.0", wall:"6,976", n:"0"},
+  ];
+  const w = Math.max(...rows.map(r => r.name.length), "model".length);
+  const L = [E("hdr","Models measured on this machine"), ""];
+  L.push(E("hdr","  " + pad("model", w) + "   " + padl("loads at",8) + "   " + padl("safe context",13) + "   " + padl("speed",9) + "   fit"));
+  for (const r of rows) {
+    let line = "  " + pad(r.name, w) + "   " + padl(r.loads,8) + "   " + E("g",padl(r.safe,13)) + "   " + padl(r.speed,9) + "   " + r.fit;
+    if (r.flag) line += "   " + E("y", r.flag);
+    L.push(line);
+  }
+  if (verbose) {
+    L.push("");
+    L.push(E("hdr","raw fit (--verbose)") + E("dim","   safe = ceiling kept below the wall; crash = where the fit hits it"));
+    L.push(E("dim","  " + pad("model", w) + "   " + padl("GB/1k",7) + "   " + padl("R²",7) + "   " + padl("crash ctx",10) + "   " + padl("runs",5)));
+    for (const r of rows)
+      L.push(E("dim","  " + pad(r.name, w) + "   " + padl(r.slope,7) + "   " + padl(r.r2,7) + "   " + padl(r.wall,10) + "   " + padl(r.n,5)));
+  }
+  if (gloss) L.push("\n" + E("dim",
+    "  loads at      memory just to load the model\n" +
+    "  safe context  largest context we guarantee won't cross the crash wall\n" +
+    "  speed         measured tokens/sec from real runs (— = not run yet)\n" +
+    "  fit           confidence of the measurement (good / ok / poor)"));
+  L.push(nextBlock([{cmd:"wmx-suite run --model <model>", why:"launch one safely"}], gloss));
+  return L.join("\n");
+}
+
+/* =======================================================================
+   RUN — refusal (RULE #1)
+   ===================================================================== */
+function renderRefusalCurrent() {
+  return [
+    `[run] mlx-community/gpt-oss-20b-MXFP4-Q8`,
+    `[run] source=measured  cache=RotatingKVCache  kv=fp16 (RotatingKVCache — not quantizable)`,
+    `[run] live_base 3.12GB + model 12.44GB = 15.56GB  |  slope 0.36003GB/1k  |  wall 17.18GB  threshold 15.18GB`,
+    `[run] ` + E("r","REFUSED: safe cap 0 tok < 512 — base leaves no useful context headroom."),
+    `[run] (pass --force to override at your own risk — may crash the machine)`,
+  ].join("\n");
+}
+function renderRefusalProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const L = [];
+  L.push(E("r","✗  Won't run gpt-oss-20b-MXFP4-Q8 — it can't fit safely on this Mac."));
+  L.push("");
+  L.push("   " + E("lbl","why ") + "  loading it needs " + E("y","15.56 GB") + ", but your safe budget is only " + E("g","15.18 GB") + ".");
+  if (gloss) {
+    L.push("          That leaves no room for context — even a short prompt would push past");
+    L.push("          the crash wall (" + E("y","17.18 GB") + "), which can hard-lock the machine.");
+  }
+  L.push("");
+  L.push("   " + E("lbl","try ") + "  " + E("a","wmx-suite health") + E("dim","          see which models DO fit right now"));
+  L.push("          " + E("a","free up memory") + E("dim","            close other apps, then re-check health"));
+  L.push("          " + E("a","run --force") + E("dim","               override at your own risk — may crash the Mac"));
+  if (verbose) {
+    L.push("");
+    L.push(E("hdr","   raw (--verbose)"));
+    L.push(E("dim","   source=measured  cache=RotatingKVCache  kv=fp16 (not quantizable)"));
+    L.push(E("dim","   live_base 3.12 + model 12.44 = 15.56 GB  ·  slope 0.36003 GB/1k"));
+    L.push(E("dim","   wall 17.18  ·  threshold 15.18  ·  safe cap 0 tok < MIN_USEFUL_CTX 512"));
+  }
+  return L.join("\n");
+}
+
+/* =======================================================================
+   ERROR — model not in cache
+   ===================================================================== */
+function renderNotFoundCurrent() {
+  return E("r","not found in cache: mlx-community/Llama-3-70B");
+}
+function renderNotFoundProposed(mode) {
+  const gloss = true; const verbose = mode === "verbose";
+  const L = [];
+  L.push(E("r","✗  mlx-community/Llama-3-70B isn't in your Hugging Face cache."));
+  if (gloss) { L.push(""); L.push("   " + E("dim","The suite only sees models you've already downloaded.")); }
+  L.push("");
+  L.push("   " + E("lbl","try ") + "  " + E("a","hf download mlx-community/Llama-3-70B") + E("dim","   get it first"));
+  L.push("          " + E("a","wmx-suite scan") + E("dim","                       then re-scan your cache"));
+  L.push("          " + E("a","wmx-suite list") + E("dim","                       see what's already measured"));
+  if (verbose) {
+    L.push("");
+    L.push(E("dim","   searched: ~/.cache/huggingface/hub  (HF_HOME unset)"));
+  }
+  return L.join("\n");
+}
+
+/* ---- wiring ------------------------------------------------------------ */
+let state = { version: "proposed", verbosity: "normal" };
+
+function render() {
+  const lan = document.getElementById("out-landing");
+  const sys = document.getElementById("out-system");
+  const hea = document.getElementById("out-health");
+  const ids = {
+    scan: [renderScanCurrent, renderScanProposed],
+    show: [renderShowCurrent, renderShowProposed],
+    list: [renderListCurrent, renderListProposed],
+    refusal: [renderRefusalCurrent, renderRefusalProposed],
+    notfound: [renderNotFoundCurrent, renderNotFoundProposed],
+  };
+  if (state.version === "current") {
+    lan.innerHTML = renderLandingCurrent();
+    sys.innerHTML = renderSystemCurrent();
+    hea.innerHTML = renderHealthCurrent();
+    for (const k in ids) document.getElementById("out-" + k).innerHTML = ids[k][0]();
+  } else {
+    lan.innerHTML = renderLandingProposed(state.verbosity);
+    sys.innerHTML = renderSystemProposed(state.verbosity);
+    hea.innerHTML = renderHealthProposed(state.verbosity);
+    for (const k in ids) document.getElementById("out-" + k).innerHTML = ids[k][1](state.verbosity);
+  }
+  document.getElementById("verbosity-group").style.opacity = state.version === "proposed" ? "1" : ".35";
+  document.getElementById("verbosity-group").style.pointerEvents = state.version === "proposed" ? "auto" : "none";
+}
+
+document.querySelectorAll("#seg-version button").forEach(b => {
+  b.onclick = () => {
+    state.version = b.dataset.v;
+    document.querySelectorAll("#seg-version button").forEach(x => x.classList.toggle("active", x === b));
+    render();
+  };
+});
+document.querySelectorAll("#seg-verbosity button").forEach(b => {
+  b.onclick = () => {
+    state.verbosity = b.dataset.vb;
+    document.querySelectorAll("#seg-verbosity button").forEach(x => x.classList.toggle("active", x === b));
+    render();
+  };
+});
+
+render();
+</script>
+</body>
+</html>
