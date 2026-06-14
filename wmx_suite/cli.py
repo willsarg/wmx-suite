@@ -34,6 +34,9 @@ from .views import scan as view_scan
 from .views import show as view_show
 from .views import system as view_system
 from .views import run_messages as view_run
+from .views import benchmark_kokoro as view_bench_kokoro
+from .views import benchmark_kokoro_concurrency as view_bench_kokoro_conc
+from .views import benchmark_embeddings as view_bench_embed
 
 # Default Console for the `run` fast path; main() replaces it per-invocation.
 CONSOLE = Console.from_args()
@@ -365,16 +368,6 @@ def cmd_benchmark_embeddings(args):
     batches = [int(x) for x in str(args.batches).split(",") if x.strip()]
     seqs = [int(x) for x in str(args.seqs).split(",") if x.strip()]
 
-    print("============================================================")
-    print(" ModernBERT Embeddings Memory Benchmark (batch x seq)")
-    print("============================================================")
-    print(f"  Model   : {args.model}")
-    print(f"  Batches : {batches}")
-    print(f"  Seqs    : {seqs}")
-    print(f"  Repeats : {args.repeats}")
-    print(f"  Margin  : {margin_val} GB")
-    print("------------------------------------------------------------")
-
     import mlx.core as mx
     mlx_version = mx.__version__
 
@@ -383,46 +376,80 @@ def cmd_benchmark_embeddings(args):
 
     ignore_profile = getattr(args, "ignore_profile", False)
     if not ignore_profile and profiles.embedding_coeffs(con, args.model, mlx_version):
-        print("  calibration profile: loaded (seeding gate)")
+        profile_source = "loaded"
+    elif ignore_profile:
+        profile_source = "ignored"
     else:
-        print("  calibration profile: none — cold start"
-              + (" (--ignore-profile)" if ignore_profile else ""))
+        profile_source = "cold"
 
+    console = getattr(args, "console", None) or CONSOLE
+
+    # Accumulate cells for the final render.  Aborted flags come from events.
+    cells: dict = {}
     aborted = False
+    safeguard_data: dict | None = None
 
-    def render(event):
-        nonlocal aborted
+    def on_event(event):
+        nonlocal aborted, safeguard_data
         ev = event.get("event")
         if ev == "preflight_abort":
-            print(f"  PRE-FLIGHT ABORT: {event['note']}")
             aborted = True
+            # Render the safeguard guidance immediately so the user sees it.
+            view_bench_embed.render_safeguard(console, {
+                "model": args.model,
+                "reason": event.get("note", "pre-flight check refused this run"),
+                "predicted_gb": event.get("predicted_gb") or 0.0,
+                "safe_budget_gb": event.get("safe_budget_gb") or 0.0,
+                "margin_gb": margin_val,
+            })
         elif ev == "error":
-            print(f"  ERROR at batch {event.get('batch')} seq {event.get('seq')}: "
-                  f"{event.get('note')}")
             aborted = True
+            console.emit(console.style(
+                "warn",
+                f"ERROR at batch {event.get('batch')} seq {event.get('seq')}: "
+                f"{event.get('note')}"
+            ))
         elif ev == "row_skipped":
-            pred = event.get("predicted_gb")
-            pred_s = f"{pred:.2f} GB" if pred is not None else "pruned"
-            print(f"  SKIP  batch={event['batch']:<3} seq={event['seq']:<6} "
-                  f"(predicted {pred_s})")
+            b, s = event["batch"], event["seq"]
+            cells[(b, s)] = {
+                "status": "skipped",
+                "throughput_tps": None,
+                "latency_ms": None,
+                "peak_gb": None,
+                "os_wired_gb": None,
+                "predicted_gb": event.get("predicted_gb"),
+            }
         elif ev == "cell_done":
-            print(f"  OK    batch={event['batch']:<3} seq={event['seq']:<6} "
-                  f"wired={event['os_wired_gb']:.2f}GB  peak={event['peak_gb']:.2f}GB  "
-                  f"{event['throughput_tps']:.0f} tok/s  {event['latency_ms']:.1f}ms")
+            b, s = event["batch"], event["seq"]
+            cells[(b, s)] = {
+                "status": "measured",
+                "throughput_tps": event.get("throughput_tps"),
+                "latency_ms": event.get("latency_ms"),
+                "peak_gb": event.get("peak_gb"),
+                "os_wired_gb": event.get("os_wired_gb"),
+                "predicted_gb": event.get("predicted_gb"),
+            }
 
     summary = embeddings_probe.sweep(
         con, run_id, args.model, batches=batches, seqs=seqs,
         repeats=args.repeats, margin_gb=margin_val, mlx_version=mlx_version,
-        ignore_profile=ignore_profile, on_event=render,
+        ignore_profile=ignore_profile, on_event=on_event,
     )
 
     if aborted:
         sys.exit(1)
 
-    print("============================================================")
-    print(f"  Done. Measured {summary['n_cells_measured']} cells, "
-          f"skipped {summary['n_cells_skipped']}. Saved as Run ID: {run_id}")
-    print("============================================================")
+    view_bench_embed.render_surface(console, {
+        "model": args.model,
+        "margin_gb": margin_val,
+        "profile_source": profile_source,
+        "mlx_version": mlx_version,
+        "batches": batches,
+        "seqs": seqs,
+        "cells": cells,
+        "n_cells_measured": summary.get("n_cells_measured", 0),
+        "n_cells_skipped": summary.get("n_cells_skipped", 0),
+    })
 
 
 def cmd_benchmark_kokoro(args):
@@ -430,16 +457,6 @@ def cmd_benchmark_kokoro(args):
     import json
 
     margin_val = _configured_margin(args.margin)
-
-    print("============================================================")
-    print(" Kokoro TTS Performance Benchmark")
-    print("============================================================")
-    print(f"  Model ID    : {args.model}")
-    print(f"  Voice       : {args.voice}")
-    print(f"  Sweeps      : {args.lengths}")
-    print(f"  Repeats/len : {args.repeats}")
-    print(f"  Margin      : {margin_val} GB")
-    print("------------------------------------------------------------")
 
     py = sys.executable
     cmd = [
@@ -457,15 +474,15 @@ def cmd_benchmark_kokoro(args):
     con = db.connect()
     run_id = db.start_kokoro_run(con, args.model, args.voice, mlx_version)
 
-    print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
+    console = getattr(args, "console", None) or CONSOLE
 
-    table_header = "\n\n  Length (char) | Audio (s) | Compute (s) |   RTF   |   CPS   | Peak Mem (GB) | OS Wired (GB)\n  --------------+-----------+-------------+---------+---------+---------------+--------------"
-    header_printed = False
+    rows: list[dict] = []
     safeguard_triggered = False
+    safeguard_note: str = ""
     error_triggered = False
 
     def on_line(raw_line):
-        nonlocal header_printed, safeguard_triggered, error_triggered
+        nonlocal safeguard_triggered, safeguard_note, error_triggered
         line = raw_line.strip()
         if not line.startswith("{"):
             return None
@@ -476,15 +493,11 @@ def cmd_benchmark_kokoro(args):
 
         status = data.get("status")
         if status == "warmup_done":
-            print(" OK", end="", flush=True)
+            pass  # no output — the view renders the full table at the end
         elif status == "safeguard_triggered":
-            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
             safeguard_triggered = True
+            safeguard_note = data.get("note", "")
         elif status == "rung_done":
-            if not header_printed:
-                print(table_header)
-                header_printed = True
-
             length = data["length"]
             audio_dur = data["audio_duration"]
             comp_time = data["compute_time"]
@@ -492,10 +505,15 @@ def cmd_benchmark_kokoro(args):
             cps = data["cps"]
             peak_gb = data["peak_gb"]
             os_wired = data.get("os_wired_gb")
-
-            os_wired_str = f"{os_wired:<12.2f}" if os_wired is not None else f"{'—':<12}"
-            print(f"  {length:<13} | {audio_dur:<9.2f} | {comp_time:<11.2f} | {rtf:<7.4f} | {cps:<7.1f} | {peak_gb:<13.2f} | {os_wired_str}")
-
+            rows.append({
+                "length": length,
+                "audio_dur": audio_dur,
+                "compute_time": comp_time,
+                "rtf": rtf,
+                "cps": cps,
+                "peak_gb": peak_gb,
+                "os_wired_gb": os_wired,
+            })
             db.add_kokoro_measurement(
                 con, run_id,
                 text_length=length,
@@ -507,7 +525,7 @@ def cmd_benchmark_kokoro(args):
                 os_wired_gb=os_wired
             )
         elif status == "error":
-            print(f"\n  ERROR: {data.get('note')}")
+            console.emit(console.style("warn", f"ERROR: {data.get('note')}"))
             error_triggered = True
             return True  # signal _stream_worker to terminate the child immediately
         return None
@@ -515,22 +533,34 @@ def cmd_benchmark_kokoro(args):
     try:
         returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
-        print("\n  Benchmark interrupted by user.")
+        console.emit(console.style("warn", "Benchmark interrupted by user."))
         sys.exit(1)
 
     if error_triggered:
         sys.exit(1)
 
     if returncode != 0:
-        print(f"\n  Worker exited with code {returncode}.")
+        console.emit(console.style("warn", f"Worker exited with code {returncode}."))
         if stderr_text:
-            print(f"  Stderr: {stderr_text}")
+            console.emit(console.style("gloss", f"Stderr: {stderr_text}"))
         sys.exit(returncode)
 
-    # safeguard_triggered is a successful early stop: fall through to the banner.
-    print("============================================================")
-    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
-    print("============================================================")
+    if safeguard_triggered:
+        view_bench_kokoro.render_safeguard(console, {
+            "note": safeguard_note,
+            "next_cmd": "wmx-suite benchmark-kokoro --lengths <shorter>",
+        })
+
+    view_bench_kokoro.render_perf(console, {
+        "model": args.model,
+        "voice": args.voice,
+        "lengths": args.lengths,
+        "repeats": args.repeats,
+        "margin": margin_val,
+        "rows": rows,
+        "safeguard_triggered": safeguard_triggered,
+        "run_id": run_id,
+    })
 
 
 def cmd_benchmark_kokoro_ttfa(args):
@@ -538,16 +568,6 @@ def cmd_benchmark_kokoro_ttfa(args):
     import json
 
     margin_val = _configured_margin(args.margin)
-
-    print("============================================================")
-    print(" Kokoro TTS Time-to-First-Audio (TTFA) Benchmark")
-    print("============================================================")
-    print(f"  Model ID    : {args.model}")
-    print(f"  Voice       : {args.voice}")
-    print(f"  Sweeps      : {args.lengths}")
-    print(f"  Repeats/len : {args.repeats}")
-    print(f"  Margin      : {margin_val} GB")
-    print("------------------------------------------------------------")
 
     py = sys.executable
     cmd = [
@@ -565,15 +585,15 @@ def cmd_benchmark_kokoro_ttfa(args):
     con = db.connect()
     run_id = db.start_kokoro_ttfa_run(con, args.model, args.voice, mlx_version)
 
-    print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
+    console = getattr(args, "console", None) or CONSOLE
 
-    table_header = "\n\n  Length (char) | TTFA (s) | Total (s) | Speedup | First Chunk (s) | Peak Mem (GB)\n  --------------+----------+-----------+---------+-----------------+--------------"
-    header_printed = False
+    rows: list[dict] = []
     safeguard_triggered = False
+    safeguard_note: str = ""
     error_triggered = False
 
     def on_line(raw_line):
-        nonlocal header_printed, safeguard_triggered, error_triggered
+        nonlocal safeguard_triggered, safeguard_note, error_triggered
         line = raw_line.strip()
         if not line.startswith("{"):
             return None
@@ -584,24 +604,25 @@ def cmd_benchmark_kokoro_ttfa(args):
 
         status = data.get("status")
         if status == "warmup_done":
-            print(" OK", end="", flush=True)
+            pass
         elif status == "safeguard_triggered":
-            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
             safeguard_triggered = True
+            safeguard_note = data.get("note", "")
         elif status == "rung_done":
-            if not header_printed:
-                print(table_header)
-                header_printed = True
-
             length = data["length"]
             ttfa_sec = data["ttfa_sec"]
             total_sec = data["total_sec"]
             speedup = data["speedup_ratio"]
             chunk_dur = data["first_chunk_duration"]
             peak_gb = data["peak_gb"]
-
-            print(f"  {length:<13} | {ttfa_sec:<8.3f} | {total_sec:<9.3f} | {speedup:<7.1f}x | {chunk_dur:<15.2f} | {peak_gb:<12.2f}")
-
+            rows.append({
+                "length": length,
+                "ttfa_sec": ttfa_sec,
+                "total_sec": total_sec,
+                "speedup_ratio": speedup,
+                "first_chunk_dur": chunk_dur,
+                "peak_gb": peak_gb,
+            })
             db.add_kokoro_ttfa_measurement(
                 con, run_id,
                 text_length=length,
@@ -612,7 +633,7 @@ def cmd_benchmark_kokoro_ttfa(args):
                 peak_gb=peak_gb
             )
         elif status == "error":
-            print(f"\n  ERROR: {data.get('note')}")
+            console.emit(console.style("warn", f"ERROR: {data.get('note')}"))
             error_triggered = True
             return True  # signal _stream_worker to terminate the child immediately
         return None
@@ -620,22 +641,34 @@ def cmd_benchmark_kokoro_ttfa(args):
     try:
         returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
-        print("\n  Benchmark interrupted by user.")
+        console.emit(console.style("warn", "Benchmark interrupted by user."))
         sys.exit(1)
 
     if error_triggered:
         sys.exit(1)
 
     if returncode != 0:
-        print(f"\n  Worker exited with code {returncode}.")
+        console.emit(console.style("warn", f"Worker exited with code {returncode}."))
         if stderr_text:
-            print(f"  Stderr: {stderr_text}")
+            console.emit(console.style("gloss", f"Stderr: {stderr_text}"))
         sys.exit(returncode)
 
-    # safeguard_triggered is a successful early stop: fall through to the banner.
-    print("============================================================")
-    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
-    print("============================================================")
+    if safeguard_triggered:
+        view_bench_kokoro.render_safeguard(console, {
+            "note": safeguard_note,
+            "next_cmd": "wmx-suite benchmark-kokoro-ttfa --lengths <shorter>",
+        })
+
+    view_bench_kokoro.render_ttfa(console, {
+        "model": args.model,
+        "voice": args.voice,
+        "lengths": args.lengths,
+        "repeats": args.repeats,
+        "margin": margin_val,
+        "rows": rows,
+        "safeguard_triggered": safeguard_triggered,
+        "run_id": run_id,
+    })
 
 
 def cmd_benchmark_kokoro_batch(args):
@@ -643,16 +676,6 @@ def cmd_benchmark_kokoro_batch(args):
     import json
 
     margin_val = _configured_margin(args.margin)
-
-    print("============================================================")
-    print(" Kokoro TTS Batch Size vs Synthesis Throughput Benchmark")
-    print("============================================================")
-    print(f"  Model ID    : {args.model}")
-    print(f"  Voice       : {args.voice}")
-    print(f"  Batch Sizes : {args.batch_sizes}")
-    print(f"  Repeats     : {args.repeats}")
-    print(f"  Margin      : {margin_val} GB")
-    print("------------------------------------------------------------")
 
     py = sys.executable
     cmd = [
@@ -670,15 +693,15 @@ def cmd_benchmark_kokoro_batch(args):
     con = db.connect()
     run_id = db.start_kokoro_batch_run(con, args.model, args.voice, mlx_version)
 
-    print("  [warmup] Compiling model graphs and Metal GPU kernels...", end="", flush=True)
+    console = getattr(args, "console", None) or CONSOLE
 
-    table_header = "\n\n  Batch Size    | Total Time (s) | Throughput (CPS) | Peak Mem (GB)\n  --------------+----------------+------------------+--------------"
-    header_printed = False
+    rows: list[dict] = []
     safeguard_triggered = False
+    safeguard_note: str = ""
     error_triggered = False
 
     def on_line(raw_line):
-        nonlocal header_printed, safeguard_triggered, error_triggered
+        nonlocal safeguard_triggered, safeguard_note, error_triggered
         line = raw_line.strip()
         if not line.startswith("{"):
             return None
@@ -689,22 +712,21 @@ def cmd_benchmark_kokoro_batch(args):
 
         status = data.get("status")
         if status == "warmup_done":
-            print(" OK", end="", flush=True)
+            pass
         elif status == "safeguard_triggered":
-            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
             safeguard_triggered = True
+            safeguard_note = data.get("note", "")
         elif status == "rung_done":
-            if not header_printed:
-                print(table_header)
-                header_printed = True
-
             batch_size = data["batch_size"]
             total_time = data["total_time"]
             cps = data["cps"]
             peak_gb = data["peak_gb"]
-
-            print(f"  {batch_size:<13} | {total_time:<14.2f} | {cps:<16.1f} | {peak_gb:<12.2f}")
-
+            rows.append({
+                "batch_size": batch_size,
+                "total_time": total_time,
+                "cps": cps,
+                "peak_gb": peak_gb,
+            })
             db.add_kokoro_batch_measurement(
                 con, run_id,
                 batch_size=batch_size,
@@ -713,7 +735,7 @@ def cmd_benchmark_kokoro_batch(args):
                 peak_gb=peak_gb
             )
         elif status == "error":
-            print(f"\n  ERROR: {data.get('note')}")
+            console.emit(console.style("warn", f"ERROR: {data.get('note')}"))
             error_triggered = True
             return True  # signal _stream_worker to terminate the child immediately
         return None
@@ -721,22 +743,34 @@ def cmd_benchmark_kokoro_batch(args):
     try:
         returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
-        print("\n  Benchmark interrupted by user.")
+        console.emit(console.style("warn", "Benchmark interrupted by user."))
         sys.exit(1)
 
     if error_triggered:
         sys.exit(1)
 
     if returncode != 0:
-        print(f"\n  Worker exited with code {returncode}.")
+        console.emit(console.style("warn", f"Worker exited with code {returncode}."))
         if stderr_text:
-            print(f"  Stderr: {stderr_text}")
+            console.emit(console.style("gloss", f"Stderr: {stderr_text}"))
         sys.exit(returncode)
 
-    # safeguard_triggered is a successful early stop: fall through to the banner.
-    print("============================================================")
-    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
-    print("============================================================")
+    if safeguard_triggered:
+        view_bench_kokoro_conc.render_safeguard(console, {
+            "note": safeguard_note,
+            "next_cmd": "wmx-suite benchmark-kokoro-batch --batch-sizes <smaller>",
+        })
+
+    view_bench_kokoro_conc.render_batch(console, {
+        "model": args.model,
+        "voice": args.voice,
+        "batch_sizes": args.batch_sizes,
+        "repeats": args.repeats,
+        "margin": margin_val,
+        "rows": rows,
+        "safeguard_triggered": safeguard_triggered,
+        "run_id": run_id,
+    })
 
 
 def cmd_benchmark_kokoro_voice(args):
@@ -744,16 +778,6 @@ def cmd_benchmark_kokoro_voice(args):
     import json
 
     margin_val = _configured_margin(args.margin)
-
-    print("============================================================")
-    print(" Kokoro TTS Voice Switching Latency Benchmark")
-    print("============================================================")
-    print(f"  Model ID    : {args.model}")
-    print(f"  Voice A     : {args.voice_a}")
-    print(f"  Voice B     : {args.voice_b}")
-    print(f"  Repeats     : {args.repeats}")
-    print(f"  Margin      : {margin_val} GB")
-    print("------------------------------------------------------------")
 
     py = sys.executable
     cmd = [
@@ -771,15 +795,15 @@ def cmd_benchmark_kokoro_voice(args):
     con = db.connect()
     run_id = db.start_kokoro_voice_run(con, args.model, mlx_version)
 
-    print("  [warmup] Compiling model graphs and loading voices...", end="", flush=True)
+    console = getattr(args, "console", None) or CONSOLE
 
-    table_header = "\n\n  Condition Type   | Voice From | Voice To   | Latency (ms)\n  -----------------+------------+------------+-------------"
-    header_printed = False
+    rows: list[dict] = []
     safeguard_triggered = False
+    safeguard_note: str = ""
     error_triggered = False
 
     def on_line(raw_line):
-        nonlocal header_printed, safeguard_triggered, error_triggered
+        nonlocal safeguard_triggered, safeguard_note, error_triggered
         line = raw_line.strip()
         if not line.startswith("{"):
             return None
@@ -790,22 +814,21 @@ def cmd_benchmark_kokoro_voice(args):
 
         status = data.get("status")
         if status == "warmup_done":
-            print(" OK", end="", flush=True)
+            pass
         elif status == "safeguard_triggered":
-            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
             safeguard_triggered = True
+            safeguard_note = data.get("note", "")
         elif status == "rung_done":
-            if not header_printed:
-                print(table_header)
-                header_printed = True
-
             cond_type = data["cond_type"]
             voice_from = data["voice_from"]
             voice_to = data["voice_to"]
             duration_ms = data["duration_ms"]
-
-            print(f"  {cond_type:<16} | {voice_from:<10} | {voice_to:<10} | {duration_ms:<12.1f}")
-
+            rows.append({
+                "cond_type": cond_type,
+                "voice_from": voice_from,
+                "voice_to": voice_to,
+                "duration_ms": duration_ms,
+            })
             db.add_kokoro_voice_measurement(
                 con, run_id,
                 cond_type=cond_type,
@@ -814,7 +837,7 @@ def cmd_benchmark_kokoro_voice(args):
                 duration_ms=duration_ms
             )
         elif status == "error":
-            print(f"\n  ERROR: {data.get('note')}")
+            console.emit(console.style("warn", f"ERROR: {data.get('note')}"))
             error_triggered = True
             return True  # signal _stream_worker to terminate the child immediately
         return None
@@ -822,22 +845,34 @@ def cmd_benchmark_kokoro_voice(args):
     try:
         returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
-        print("\n  Benchmark interrupted by user.")
+        console.emit(console.style("warn", "Benchmark interrupted by user."))
         sys.exit(1)
 
     if error_triggered:
         sys.exit(1)
 
     if returncode != 0:
-        print(f"\n  Worker exited with code {returncode}.")
+        console.emit(console.style("warn", f"Worker exited with code {returncode}."))
         if stderr_text:
-            print(f"  Stderr: {stderr_text}")
+            console.emit(console.style("gloss", f"Stderr: {stderr_text}"))
         sys.exit(returncode)
 
-    # safeguard_triggered is a successful early stop: fall through to the banner.
-    print("============================================================")
-    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
-    print("============================================================")
+    if safeguard_triggered:
+        view_bench_kokoro_conc.render_safeguard(console, {
+            "note": safeguard_note,
+            "next_cmd": "wmx-suite benchmark-kokoro-voice --repeats <fewer>",
+        })
+
+    view_bench_kokoro_conc.render_voice(console, {
+        "model": args.model,
+        "voice_a": args.voice_a,
+        "voice_b": args.voice_b,
+        "repeats": args.repeats,
+        "margin": margin_val,
+        "rows": rows,
+        "safeguard_triggered": safeguard_triggered,
+        "run_id": run_id,
+    })
 
 
 def cmd_benchmark_kokoro_cache(args):
@@ -845,14 +880,6 @@ def cmd_benchmark_kokoro_cache(args):
     import json
 
     margin_val = _configured_margin(args.margin)
-
-    print("============================================================")
-    print(" Kokoro TTS Voice Cache Memory Benchmark")
-    print("============================================================")
-    print(f"  Model ID    : {args.model}")
-    print(f"  Cache Sizes : {args.cache_sizes}")
-    print(f"  Margin      : {margin_val} GB")
-    print("------------------------------------------------------------")
 
     py = sys.executable
     cmd = [
@@ -868,15 +895,15 @@ def cmd_benchmark_kokoro_cache(args):
     con = db.connect()
     run_id = db.start_kokoro_cache_run(con, args.model, mlx_version)
 
-    print("  [warmup] Compiling model graphs and loading voices...", end="", flush=True)
+    console = getattr(args, "console", None) or CONSOLE
 
-    table_header = "\n\n  Cache Size (Voices) | OS Wired (GB) | Peak Memory (GB)\n  --------------------+---------------+-----------------"
-    header_printed = False
+    rows: list[dict] = []
     safeguard_triggered = False
+    safeguard_note: str = ""
     error_triggered = False
 
     def on_line(raw_line):
-        nonlocal header_printed, safeguard_triggered, error_triggered
+        nonlocal safeguard_triggered, safeguard_note, error_triggered
         line = raw_line.strip()
         if not line.startswith("{"):
             return None
@@ -887,21 +914,19 @@ def cmd_benchmark_kokoro_cache(args):
 
         status = data.get("status")
         if status == "warmup_done":
-            print(" OK", end="", flush=True)
+            pass
         elif status == "safeguard_triggered":
-            print(f"\n  [safeguard] Warning: Stopped sweep early: {data.get('note')}")
             safeguard_triggered = True
+            safeguard_note = data.get("note", "")
         elif status == "rung_done":
-            if not header_printed:
-                print(table_header)
-                header_printed = True
-
             cache_size = data["cache_size"]
             os_wired_gb = data["os_wired_gb"]
             peak_gb = data["peak_gb"]
-
-            print(f"  {cache_size:<18} | {os_wired_gb:<13.3f} | {peak_gb:<15.3f}")
-
+            rows.append({
+                "cache_size": cache_size,
+                "os_wired_gb": os_wired_gb,
+                "peak_gb": peak_gb,
+            })
             db.add_kokoro_cache_measurement(
                 con, run_id,
                 cache_size=cache_size,
@@ -909,7 +934,7 @@ def cmd_benchmark_kokoro_cache(args):
                 peak_gb=peak_gb
             )
         elif status == "error":
-            print(f"\n  ERROR: {data.get('note')}")
+            console.emit(console.style("warn", f"ERROR: {data.get('note')}"))
             error_triggered = True
             return True  # signal _stream_worker to terminate the child immediately
         return None
@@ -917,22 +942,32 @@ def cmd_benchmark_kokoro_cache(args):
     try:
         returncode, stderr_text = _stream_worker(cmd, on_line)
     except KeyboardInterrupt:
-        print("\n  Benchmark interrupted by user.")
+        console.emit(console.style("warn", "Benchmark interrupted by user."))
         sys.exit(1)
 
     if error_triggered:
         sys.exit(1)
 
     if returncode != 0:
-        print(f"\n  Worker exited with code {returncode}.")
+        console.emit(console.style("warn", f"Worker exited with code {returncode}."))
         if stderr_text:
-            print(f"  Stderr: {stderr_text}")
+            console.emit(console.style("gloss", f"Stderr: {stderr_text}"))
         sys.exit(returncode)
 
-    # safeguard_triggered is a successful early stop: fall through to the banner.
-    print("============================================================")
-    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
-    print("============================================================")
+    if safeguard_triggered:
+        view_bench_kokoro_conc.render_safeguard(console, {
+            "note": safeguard_note,
+            "next_cmd": "wmx-suite benchmark-kokoro-cache --cache-sizes <smaller>",
+        })
+
+    view_bench_kokoro_conc.render_cache(console, {
+        "model": args.model,
+        "cache_sizes": args.cache_sizes,
+        "margin": margin_val,
+        "rows": rows,
+        "safeguard_triggered": safeguard_triggered,
+        "run_id": run_id,
+    })
 
 
 def cmd_benchmark_kokoro_baseline(args):
@@ -940,14 +975,6 @@ def cmd_benchmark_kokoro_baseline(args):
     import json
 
     margin_val = _configured_margin(args.margin)
-
-    print("============================================================")
-    print(" Kokoro TTS Active Memory Baseline Benchmark")
-    print("============================================================")
-    print(f"  Model ID    : {args.model}")
-    print(f"  Voice       : {args.voice}")
-    print(f"  Margin      : {margin_val} GB")
-    print("------------------------------------------------------------")
 
     py = sys.executable
     cmd = [
@@ -963,8 +990,9 @@ def cmd_benchmark_kokoro_baseline(args):
     con = db.connect()
     run_id = db.start_kokoro_baseline_run(con, args.model, mlx_version)
 
-    print("  [profiling] Measuring settled OS baseline and active memory...", end="", flush=True)
+    console = getattr(args, "console", None) or CONSOLE
 
+    baseline_result: dict = {}
     error_triggered = False
 
     def on_line(raw_line):
@@ -979,16 +1007,12 @@ def cmd_benchmark_kokoro_baseline(args):
 
         status = data.get("status")
         if status == "rung_done":
-            print(" OK", end="", flush=True)
-
             baseline_gb = data["baseline_gb"]
             active_gb = data["active_gb"]
             overhead_gb = data["overhead_gb"]
-
-            print(f"\n\n  System Baseline RAM: {baseline_gb:.3f} GB")
-            print(f"  Active Synthesis RAM: {active_gb:.3f} GB")
-            print(f"  Static Active Overhead: {overhead_gb:.3f} GB")
-
+            baseline_result["baseline_gb"] = baseline_gb
+            baseline_result["active_gb"] = active_gb
+            baseline_result["overhead_gb"] = overhead_gb
             db.add_kokoro_baseline_measurement(
                 con, run_id,
                 baseline_gb=baseline_gb,
@@ -996,7 +1020,7 @@ def cmd_benchmark_kokoro_baseline(args):
                 overhead_gb=overhead_gb
             )
         elif status == "error":
-            print(f"\n  ERROR: {data.get('note')}")
+            console.emit(console.style("warn", f"ERROR: {data.get('note')}"))
             error_triggered = True
             return True  # signal _stream_worker to terminate the child immediately
         return None
@@ -1005,21 +1029,25 @@ def cmd_benchmark_kokoro_baseline(args):
         # capture_stderr=False: inherit terminal stderr, matching original behaviour.
         returncode, stderr_text = _stream_worker(cmd, on_line, capture_stderr=False)
     except KeyboardInterrupt:
-        print("\n  Benchmark interrupted by user.")
+        console.emit(console.style("warn", "Benchmark interrupted by user."))
         sys.exit(1)
 
     if error_triggered:
         sys.exit(1)
 
     if returncode != 0:
-        print(f"\n  Worker exited with code {returncode}.")
-        if stderr_text:
-            print(f"  Stderr: {stderr_text}")
+        console.emit(console.style("warn", f"Worker exited with code {returncode}."))
         sys.exit(returncode)
 
-    print("============================================================")
-    print(f"  Benchmark complete. Saved as Run ID: {run_id}")
-    print("============================================================")
+    view_bench_kokoro.render_baseline(console, {
+        "model": args.model,
+        "voice": args.voice,
+        "margin": margin_val,
+        "baseline_gb": baseline_result.get("baseline_gb", 0.0),
+        "active_gb": baseline_result.get("active_gb", 0.0),
+        "overhead_gb": baseline_result.get("overhead_gb", 0.0),
+        "run_id": run_id,
+    })
 
 
 

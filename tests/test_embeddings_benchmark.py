@@ -219,6 +219,7 @@ def test_monotonic_pruning_skips_larger_batch_same_seq(monkeypatch):
 
 def test_cmd_benchmark_embeddings_persists_and_renders(monkeypatch, tmp_path, capsys):
     from wmx_suite import cli, db, embeddings_probe
+    from wmx_suite.ui import Console
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
 
@@ -237,11 +238,12 @@ def test_cmd_benchmark_embeddings_persists_and_renders(monkeypatch, tmp_path, ca
     monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
 
     args = SimpleNamespace(model="mlx-community/test", batches="1,2", seqs="128,256,8192",
-                           repeats=1, margin=None)
+                           repeats=1, margin=None, console=Console(color=False, verbose=False))
     cli.cmd_benchmark_embeddings(args)
 
     out = capsys.readouterr().out
-    assert "SKIP" in out
+    # The view renders skipped cells with '✗' marker and 'skipped' in the summary line
+    assert "skipped" in out.lower()
 
     con = db.connect()
     latest = db.get_latest_embeddings_run(con)
@@ -252,6 +254,7 @@ def test_cmd_benchmark_embeddings_persists_and_renders(monkeypatch, tmp_path, ca
 
 def test_cmd_benchmark_embeddings_preflight_abort_exits(monkeypatch, tmp_path, capsys):
     from wmx_suite import cli, db, embeddings_probe
+    from wmx_suite.ui import Console
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
 
@@ -264,15 +267,17 @@ def test_cmd_benchmark_embeddings_preflight_abort_exits(monkeypatch, tmp_path, c
     monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
 
     args = SimpleNamespace(model="mlx-community/test", batches="1", seqs="128",
-                           repeats=1, margin=None)
+                           repeats=1, margin=None, console=Console(color=False, verbose=False))
     with pytest.raises(SystemExit) as ei:
         cli.cmd_benchmark_embeddings(args)
     assert ei.value.code == 1
-    assert "PRE-FLIGHT ABORT" in capsys.readouterr().out
+    # The view renders a 'Won't run' guidance block for preflight aborts.
+    assert "Won't run" in capsys.readouterr().out
 
 
 def test_cmd_benchmark_embeddings_worker_error_exits(monkeypatch, tmp_path, capsys):
     from wmx_suite import cli, db, embeddings_probe
+    from wmx_suite.ui import Console
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
 
@@ -285,7 +290,7 @@ def test_cmd_benchmark_embeddings_worker_error_exits(monkeypatch, tmp_path, caps
     monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
 
     args = SimpleNamespace(model="mlx-community/test", batches="1", seqs="128",
-                           repeats=1, margin=None)
+                           repeats=1, margin=None, console=Console(color=False, verbose=False))
     with pytest.raises(SystemExit) as ei:
         cli.cmd_benchmark_embeddings(args)
     assert ei.value.code == 1

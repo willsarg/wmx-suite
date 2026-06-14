@@ -542,6 +542,7 @@ def _make_kokoro_args(model="mlx-community/Kokoro-82M-bf16", voice="af_heart"):
         lengths="10,50,100",
         repeats=1,
         margin=None,
+        console=Console(color=False, verbose=False),
     )
 
 
@@ -600,8 +601,8 @@ def test_safeguard_triggered_exits_zero_with_banner(monkeypatch, capsys):
         )
 
     out = capsys.readouterr().out
-    assert "Benchmark complete" in out, (
-        "safeguard_triggered must print the completion banner (exit-0 path)"
+    assert "Kokoro TTS Performance Benchmark" in out, (
+        "safeguard_triggered must print the benchmark results section (exit-0 path)"
     )
     assert "safeguard" in out.lower(), (
         "safeguard_triggered must print the safeguard warning"
