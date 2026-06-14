@@ -1,7 +1,9 @@
 """Kokoro TTS active synthesis memory baseline benchmark worker.
 
-Measures the exact fixed OS-wired memory overhead (GB) occupied by Kokoro TTS
-during active synthesis.
+Measures the OS-wired memory overhead (GB) of a short warm synthesis over the idle
+baseline. NOTE: this is only the floor — Kokoro's footprint is NOT static; it grows with
+utterance length (longer output audio allocates more) and with concurrency (~GB per
+concurrent call). See the synthesis and batch benchmarks for the scaling curves.
 Prints JSON lines to stdout.
 """
 from __future__ import annotations
