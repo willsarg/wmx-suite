@@ -1192,27 +1192,38 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
         else:
             raise SystemExit("[run] REFUSED: Model is uncharacterized and shell is non-interactive. Run characterize first or pass --force.")
 
-    kv = "fp16 (RotatingKVCache — not quantizable)" if p["kv_bits"] is None else f"{p['kv_bits']}-bit"
-    print(f"[run] {model_id}", file=sys.stderr)
-    print(f"[run] source={p['source']}  cache={p['cache_type']}  kv={kv}", file=sys.stderr)
+    # Run diagnostics render to stderr (keeps the model's stdout clean), with the
+    # same color/verbose policy as the rest of the CLI. Built at call time so
+    # captured streams (tests) and the real stderr both work.
+    console = Console(color=CONSOLE.color, verbose=CONSOLE.verbose, stream=sys.stderr)
+    kv_mode = ("fp16 (not quantizable)" if p["kv_bits"] is None
+               else f"{p['kv_bits']}-bit")
     if p.get("fit_stale"):
-        print("[run] WARNING: fit may be stale — consider re-running characterize",
-              file=sys.stderr)
-    print(f"[run] live_base {p['live_base_gb']}GB + model {p['model_base_gb']}GB = "
-          f"{p['base_abs_gb']}GB  |  slope {p['slope_gb_per_k']}GB/1k  |  "
-          f"wall {p['wall_gb']}GB  threshold {p['threshold_gb']}GB", file=sys.stderr)
+        console.emit(console.style(
+            "warn", "fit may be stale — consider re-running 'wmx-suite characterize'."))
     if p["source"] == "estimated" and p.get("cold_start_profile") == "default":
-        print("[run] WARNING: using fallback cold-start constants measured on the Apple "
-              "M4 Pro testbed; run 'wmx-suite calibrate' to tune them for this machine.",
-              file=sys.stderr)
+        console.emit(console.style(
+            "warn", "using fallback cold-start constants (Apple M4 Pro testbed); "
+                    "run 'wmx-suite calibrate' to tune them for this machine."))
 
     if p.get("refuse"):
-        print(f"[run] REFUSED: {p['reason']}", file=sys.stderr)
+        view_run.render_refusal(console, {
+            "model": model_id,
+            "needs_gb": p["base_abs_gb"],
+            "budget_gb": p["threshold_gb"],
+            "wall_gb": p["wall_gb"],
+            "live_base_gb": p["live_base_gb"],
+            "model_base_gb": p["model_base_gb"],
+            "slope_gb_per_k": p["slope_gb_per_k"],
+            "safe_cap_tok": p.get("max_kv_size", 0) or 0,
+            "source": p["source"],
+            "cache_type": p["cache_type"],
+            "kv_mode": kv_mode,
+        })
         if not force:
-            print("[run] (pass --force to override at your own risk — may crash the machine)",
-                  file=sys.stderr)
             sys.exit(2)
-        print("[run] --force given; proceeding against safety advice.", file=sys.stderr)
+        console.emit(console.style(
+            "warn", "--force given; proceeding against safety advice."))
 
     try:
         argv = launcher.build_argv(rest, p, force=force)
@@ -1256,9 +1267,20 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
             print(f"[run] WARNING: prompt exceeds "
                   f"{launcher.PROMPT_WARNING_FRACTION:.0%} of the context cap",
                   file=sys.stderr)
-    enforcement = "" if p.get("max_kv_size_enforced", True) else " (NOT runtime-enforced)"
-    print(f"[run] max-kv-size {effective_cap:,} tokens{enforcement} "
-          f"(model cap {p['model_max']:,})", file=sys.stderr)
+    view_run.render_plan(console, {
+        "model": model_id,
+        "source": p["source"],
+        "cache_type": p["cache_type"],
+        "kv_mode": kv_mode,
+        "live_base_gb": p["live_base_gb"],
+        "model_base_gb": p["model_base_gb"],
+        "budget_gb": p["threshold_gb"],
+        "wall_gb": p["wall_gb"],
+        "slope_gb_per_k": p["slope_gb_per_k"],
+        "max_kv_size": effective_cap,
+        "model_max": p["model_max"],
+        "max_kv_size_enforced": p.get("max_kv_size_enforced", True),
+    })
     print(f"[run] exec: mlx_lm.generate {' '.join(argv)}\n", file=sys.stderr)
     if dry_run:
         print("[run] --dry-run: not launching.", file=sys.stderr)
@@ -1474,10 +1496,10 @@ def main():
     argv = sys.argv[1:]
     if argv and argv[0] == "run":
         run_args, verbose, no_color = _strip_global_flags(argv[1:])
-        # Build a Console with the same policy as argparse commands; stored on
-        # the module so run-path renderers (Phase 4) can pick it up.
+        # Run diagnostics go to stderr (model output owns stdout); color policy
+        # follows stderr's TTY. _run reads CONSOLE's color/verbose policy.
         global CONSOLE
-        CONSOLE = Console.from_args(no_color=no_color, verbose=verbose)
+        CONSOLE = Console.from_args(stream=sys.stderr, no_color=no_color, verbose=verbose)
         return cmd_run_raw(run_args)
     # Front door: no subcommand present (empty, or only global/help flags).
     rest, verbose, no_color = _strip_global_flags(argv)

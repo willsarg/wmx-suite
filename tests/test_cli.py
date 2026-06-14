@@ -152,7 +152,9 @@ def test_run_reports_effective_user_cap(monkeypatch, capsys):
         dry_run=True,
     )
 
-    assert "max-kv-size 2,048 tokens" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "max-kv-size" in err
+    assert "2,048 tokens" in err
 
 
 def test_run_passes_force_to_argument_validation(monkeypatch):
