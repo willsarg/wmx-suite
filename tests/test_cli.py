@@ -652,12 +652,12 @@ def test_error_exits_one_no_banner_terminates_worker(monkeypatch, capsys):
 def test_cmd_calibrate_prints_summary(monkeypatch, capsys):
     from types import SimpleNamespace
     from wmx_suite import cli, probe
-    monkeypatch.setattr(probe, "calibrate", lambda model, margin_gb=None: {
+    monkeypatch.setattr(probe, "calibrate", lambda model, margin_gb=None, console=None: {
         "hf_id": "org/tiny", "machine_key": ("Apple M4 Pro", 25769803776, 15),
         "intercept_gb": 2.0, "measured_overhead_gb": 1.48, "fixed_overhead_gb": 1.48,
         "default_overhead_gb": 1.0, "n_points": 2,
     })
-    cli.cmd_calibrate(SimpleNamespace(model="org/tiny", margin=None))
+    cli.cmd_calibrate(_ns(model="org/tiny", margin=None))
     out = capsys.readouterr().out
     assert "org/tiny" in out
     assert "Apple M4 Pro" in out
@@ -668,11 +668,11 @@ def test_cmd_calibrate_propagates_no_model_error(monkeypatch):
     import pytest
     from types import SimpleNamespace
     from wmx_suite import cli, probe
-    def boom(model, margin_gb=None):
+    def boom(model, margin_gb=None, console=None):
         raise SystemExit("[calibrate] no causal mlx-community model found in the HF cache.")
     monkeypatch.setattr(probe, "calibrate", boom)
     with pytest.raises(SystemExit, match="no causal"):
-        cli.cmd_calibrate(SimpleNamespace(model=None, margin=None))
+        cli.cmd_calibrate(_ns(model=None, margin=None))
 
 
 def _limits(*, wall_gb=17.0, wired_now_gb=3.0, **kwargs):

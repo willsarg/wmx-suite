@@ -332,7 +332,7 @@ def _pick_calibration_model() -> str:
 
 def calibrate(model: str | None = None, *, margin_gb: float | None = None,
               repeats: int = DEFAULT_REPEATS, worker_python: str | None = None,
-              verbose: bool = True) -> dict:
+              verbose: bool = True, console=None) -> dict:
     """Measure this machine's cold-start FIXED_OVERHEAD_GB and store a per-machine profile.
 
     Fits the model's base delta-over-baseline at context->0 from two small safe rungs and
@@ -352,27 +352,44 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
     kv_bits = 4 if info.can_quantize_kv else None
     py = worker_python or sys.executable
 
+    if console is None and verbose:
+        from .ui import Console
+        console = Console.from_args()
+    con_out = console
+    from .views import calibrate as _view
+
     def log(*a):
-        if verbose:
-            print(*a, flush=True)
+        if con_out is not None:
+            con_out.emit(con_out.style("dim", "  " + " ".join(str(x) for x in a)))
+
+    def _abort(test_msg: str, reason: str):
+        """Clean guidance for the CLI, original message for programmatic callers."""
+        if con_out is not None:
+            _view.render_abort(con_out, {"reason": reason})
+            raise SystemExit(1)
+        raise SystemExit(test_msg)
 
     import mlx.core as mx
     con = db.connect()
 
     est = estimate_base_gb(info, limits, con)
     if est >= threshold:
-        raise SystemExit(
+        _abort(
             f"[calibrate] estimated base {est:.2f}GB >= threshold {threshold:.2f}GB — "
             f"machine too loaded or model too large to calibrate safely. Free memory or "
-            f"pass a smaller --model."
-        )
+            f"pass a smaller --model.",
+            f"estimated load ({est:.2f} GB) is at/over the safe budget "
+            f"({threshold:.2f} GB) — the machine is too loaded, or this model is too "
+            f"big, to calibrate safely.")
 
     factor, overhead, _ = profiles.cold_start_constants(con)
     model_base = info.weights_gb * factor + overhead
     slope = info.estimated_slope_gb_per_k()
 
-    log(f"# calibrate {hf_id}  weights={info.weights_gb}GB  "
-        f"threshold={threshold:.2f}GB  kv_bits={kv_bits}")
+    if con_out is not None:
+        _view.render_header(con_out, {
+            "model": hf_id, "weights_gb": info.weights_gb, "threshold_gb": threshold,
+            "kv_mode": ("fp16" if kv_bits is None else f"{kv_bits}-bit")})
 
     xs_k: list[float] = []
     ys: list[float] = []
@@ -382,21 +399,25 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
         live_base = sample_settled_baseline()
         predicted = live_base + model_base + slope * (ctx / 1000)
         if predicted >= threshold:
-            raise SystemExit(
+            _abort(
                 f"[calibrate] predicted {predicted:.2f}GB (live {live_base:.2f} + model "
                 f"{model_base:.2f} + slope {slope:.4f}*{ctx/1000:.1f}k) >= threshold "
-                f"{threshold:.2f}GB before rung {ctx}; aborting (free memory and retry)."
-            )
+                f"{threshold:.2f}GB before rung {ctx}; aborting (free memory and retry).",
+                f"predicted {predicted:.2f} GB at {ctx:,} tok would reach the safe budget "
+                f"({threshold:.2f} GB) before measuring — aborting before any risk.")
         m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None or m.get("status") != "ok":
-            note = (m or {}).get("note", "no output")
-            raise SystemExit(f"[calibrate] rung {ctx} failed: {note}")
+            _abort(f"[calibrate] rung {ctx} failed: {(m or {}).get('note', 'no output')}",
+                   f"probe at {ctx:,} tok failed: {(m or {}).get('note', 'no output')}")
         xs_k.append(ctx / 1000)
         ys.append(m["delta"])
-        log(f"{ctx:>6}  delta={m['delta']:.3f}GB  (median of {m['repeats']})")
+        if con_out is not None:
+            _view.render_rung(con_out, {"ctx": ctx, "delta_gb": m["delta"],
+                                        "repeats": m["repeats"]})
 
     if len(xs_k) < 2:
-        raise SystemExit("[calibrate] need >=2 successful rungs to fit the base intercept.")
+        _abort("[calibrate] need >=2 successful rungs to fit the base intercept.",
+               "couldn't measure enough probe rungs to fit (need at least 2).")
 
     intercept, _slope, _r2 = _linfit(xs_k, ys)
     measured_overhead = round(intercept - profiles.DEFAULT_RESIDENT_FACTOR * info.weights_gb, 3)
@@ -406,8 +427,6 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
     db.upsert_profile(con, key, resident_factor=profiles.DEFAULT_RESIDENT_FACTOR,
                       fixed_overhead_gb=fixed_overhead, model_id=hf_id,
                       n_points=len(xs_k), mlx_version=mx.__version__)
-    log(f"# intercept(base@c->0)={intercept:.3f}GB  measured_overhead={measured_overhead:.3f}GB  "
-        f"stored={fixed_overhead:.3f}GB (floor {profiles.DEFAULT_FIXED_OVERHEAD_GB})")
     return {
         "hf_id": hf_id, "machine_key": key, "intercept_gb": round(intercept, 3),
         "measured_overhead_gb": measured_overhead, "fixed_overhead_gb": fixed_overhead,
