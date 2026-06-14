@@ -324,3 +324,21 @@ def test_embedding_profile_roundtrip_and_key_mismatch(monkeypatch, tmp_path):
 
     stale = ("Apple M4 Pro", 25769803776, 15, "0.32.0", "mlx-community/test-embed")
     assert db.get_embedding_profile(con, stale) is None
+
+
+def test_profiles_embedding_coeffs_roundtrip(monkeypatch, tmp_path):
+    from wmx_suite import profiles
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(profiles, "machine_key",
+                        lambda: ("Apple M4 Pro", 25769803776, 15))
+    con = db.connect()
+
+    assert profiles.embedding_coeffs(con, "org/m", "0.31.2") is None
+
+    profiles.upsert_embedding_coeffs(con, "org/m", "0.31.2",
+                                     coef_intercept_gb=1.1, coef_linear=2e-5,
+                                     coef_quad=6e-9, n_points=12)
+    assert profiles.embedding_coeffs(con, "org/m", "0.31.2") == (1.1, 2e-5, 6e-9)
+    # different model or mlx version -> miss
+    assert profiles.embedding_coeffs(con, "org/other", "0.31.2") is None
+    assert profiles.embedding_coeffs(con, "org/m", "9.9.9") is None

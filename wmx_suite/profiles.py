@@ -42,3 +42,30 @@ def cold_start_constants(con: sqlite3.Connection) -> tuple[float, float, str]:
     if profile is not None:
         return DEFAULT_RESIDENT_FACTOR, float(profile["fixed_overhead_gb"]), "profile"
     return DEFAULT_RESIDENT_FACTOR, DEFAULT_FIXED_OVERHEAD_GB, "default"
+
+
+def embedding_machine_key(model_id: str, mlx_version: str) -> tuple[str, int, int, str, str]:
+    """5-part key for an embedding profile: machine identity + MLX version + model."""
+    dev, ram, osv = machine_key()
+    return (dev, ram, osv, mlx_version, model_id)
+
+
+def embedding_coeffs(con: sqlite3.Connection, model_id: str,
+                     mlx_version: str) -> tuple[float, float, float] | None:
+    """Stored (intercept_gb, linear, quad) gate coefficients for this machine+mlx+model,
+    or None when there is no matching calibration profile (→ cold-start fallback)."""
+    row = db.get_embedding_profile(con, embedding_machine_key(model_id, mlx_version))
+    if row is None:
+        return None
+    return (float(row["coef_intercept_gb"]), float(row["coef_linear"]),
+            float(row["coef_quad"]))
+
+
+def upsert_embedding_coeffs(con: sqlite3.Connection, model_id: str, mlx_version: str, *,
+                            coef_intercept_gb: float, coef_linear: float,
+                            coef_quad: float, n_points: int) -> None:
+    db.upsert_embedding_profile(
+        con, embedding_machine_key(model_id, mlx_version),
+        coef_intercept_gb=coef_intercept_gb, coef_linear=coef_linear,
+        coef_quad=coef_quad, n_points=n_points,
+    )
