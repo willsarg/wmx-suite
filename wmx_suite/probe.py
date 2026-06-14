@@ -313,34 +313,50 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     return result
 
 
-def _pick_calibration_model() -> str:
-    """Smallest causal mlx-community model in the HF cache (by on-disk weight size)."""
-    candidates: list[tuple[float, str]] = []
+class _CalibrationLoadFailed(Exception):
+    """A calibration candidate failed to LOAD (vs a memory/fit abort).
+
+    Carries a clean human reason + the original message, so the caller can either
+    fall back to the next auto-picked candidate or surface guidance.
+    """
+    def __init__(self, reason: str, test_msg: str):
+        super().__init__(reason)
+        self.reason = reason
+        self.test_msg = test_msg
+
+
+def _calibration_candidates() -> list[str]:
+    """Causal mlx-community models in the HF cache, smallest weights first."""
+    out: list[tuple[float, str]] = []
     for hf_id in models.scan_cache():
         info = models.describe(hf_id)
         if info is None or not info.is_causal:
             continue
-        candidates.append((info.weights_gb, hf_id))
+        out.append((info.weights_gb, hf_id))
+    out.sort()
+    return [hf_id for _, hf_id in out]
+
+
+def _pick_calibration_model() -> str:
+    """Smallest causal mlx-community model in the HF cache (by on-disk weight size)."""
+    candidates = _calibration_candidates()
     if not candidates:
         raise SystemExit(
             "[calibrate] no causal mlx-community model found in the HF cache. "
             "Download a small one (e.g. a 0.5-1.5B mlx-community model) or pass --model."
         )
-    candidates.sort()
-    return candidates[0][1]
+    return candidates[0]
 
 
-def calibrate(model: str | None = None, *, margin_gb: float | None = None,
-              repeats: int = DEFAULT_REPEATS, worker_python: str | None = None,
-              verbose: bool = True, console=None) -> dict:
-    """Measure this machine's cold-start FIXED_OVERHEAD_GB and store a per-machine profile.
+def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int,
+                   worker_python: str | None, verbose: bool, con_out) -> dict:
+    """Calibrate using ONE model. Returns the result dict.
 
-    Fits the model's base delta-over-baseline at context->0 from two small safe rungs and
-    derives overhead = intercept - DEFAULT_RESIDENT_FACTOR * weights, floored at the default
-    so calibration only ever tightens (never loosens) the pre-flight estimate.
+    Raises ``_CalibrationLoadFailed`` if the model can't be loaded (so an
+    auto-pick caller can fall back to the next candidate). Raises ``SystemExit``
+    on a memory/fit abort — a different model wouldn't fix those.
     """
-    margin_gb = config.margin_gb(margin_gb)
-    hf_id = model or _pick_calibration_model()
+    from .views import calibrate as _view
     info = models.describe(hf_id)
     if info is None:
         raise SystemExit(f"[calibrate] model not found in HF cache: {hf_id}")
@@ -352,18 +368,11 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
     kv_bits = 4 if info.can_quantize_kv else None
     py = worker_python or sys.executable
 
-    if console is None and verbose:
-        from .ui import Console
-        console = Console.from_args()
-    con_out = console
-    from .views import calibrate as _view
-
     def log(*a):
         if con_out is not None:
             con_out.emit(con_out.style("dim", "  " + " ".join(str(x) for x in a)))
 
     def _abort(test_msg: str, reason: str, kind: str = "fit"):
-        """Clean guidance for the CLI, original message for programmatic callers."""
         if con_out is not None:
             _view.render_abort(con_out, {"reason": reason, "kind": kind})
             raise SystemExit(1)
@@ -408,9 +417,10 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
                 kind="memory")
         m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None or m.get("status") != "ok":
-            _abort(f"[calibrate] rung {ctx} failed: {(m or {}).get('note', 'no output')}",
-                   f"probe at {ctx:,} tok failed: {(m or {}).get('note', 'no output')}",
-                   kind="load")
+            note = (m or {}).get("note", "no output")
+            raise _CalibrationLoadFailed(
+                reason=f"probe at {ctx:,} tok failed: {note}",
+                test_msg=f"[calibrate] rung {ctx} failed: {note}")
         xs_k.append(ctx / 1000)
         ys.append(m["delta"])
         if con_out is not None:
@@ -434,3 +444,63 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
         "measured_overhead_gb": measured_overhead, "fixed_overhead_gb": fixed_overhead,
         "default_overhead_gb": profiles.DEFAULT_FIXED_OVERHEAD_GB, "n_points": len(xs_k),
     }
+
+
+def calibrate(model: str | None = None, *, margin_gb: float | None = None,
+              repeats: int = DEFAULT_REPEATS, worker_python: str | None = None,
+              verbose: bool = True, console=None) -> dict:
+    """Measure this machine's cold-start FIXED_OVERHEAD_GB and store a per-machine profile.
+
+    With an explicit ``model`` we calibrate that one (and surface a clean error if
+    it won't load). With no model we auto-pick the smallest cached causal model
+    and, if it fails to LOAD, fall back to the next-smallest — so a single broken
+    checkpoint in the cache doesn't sink ``wmx-suite calibrate``.
+    """
+    margin_gb = config.margin_gb(margin_gb)
+    if console is None and verbose:
+        from .ui import Console
+        console = Console.from_args()
+    con_out = console
+    from .views import calibrate as _view
+
+    explicit = model is not None
+    if explicit:
+        candidates = [model]
+    else:
+        candidates = _calibration_candidates()
+        if not candidates:
+            raise SystemExit(
+                "[calibrate] no causal mlx-community model found in the HF cache. "
+                "Download a small one (e.g. a 0.5-1.5B mlx-community model) or pass --model."
+            )
+
+    last: _CalibrationLoadFailed | None = None
+    for hf_id in candidates:
+        try:
+            return _calibrate_one(hf_id, margin_gb=margin_gb, repeats=repeats,
+                                  worker_python=worker_python, verbose=verbose,
+                                  con_out=con_out)
+        except _CalibrationLoadFailed as exc:
+            last = exc
+            if explicit:
+                # User chose this model — don't silently substitute another.
+                if con_out is not None:
+                    _view.render_abort(con_out, {"reason": exc.reason, "kind": "load"})
+                    raise SystemExit(1) from exc
+                raise SystemExit(exc.test_msg) from exc
+            # Auto-pick: this candidate didn't load — try the next-smallest.
+            if con_out is not None:
+                short = hf_id.split("/", 1)[-1]
+                con_out.emit(con_out.style(
+                    "dim", f"  {short} didn't load — trying the next cached model…"))
+                con_out.emit()
+            continue
+
+    # Auto-pick exhausted every candidate.
+    reason = ("none of the cached models could be loaded for calibration"
+              + (f" (last: {last.reason})" if last else "")
+              + ". Download a known-good small mlx-community model, or pass --model.")
+    if con_out is not None:
+        _view.render_abort(con_out, {"reason": reason, "kind": "load"})
+        raise SystemExit(1)
+    raise SystemExit(f"[calibrate] {reason}")

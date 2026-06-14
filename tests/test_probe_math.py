@@ -24,6 +24,54 @@ def test_summarize_worker_error_empty():
     assert "no result" in probe._summarize_worker_error("")
 
 
+def _ok_result(hf_id):
+    return {"hf_id": hf_id, "machine_key": ("M", 1, 15), "intercept_gb": 1.0,
+            "measured_overhead_gb": 0.5, "fixed_overhead_gb": 1.0,
+            "default_overhead_gb": 1.0, "n_points": 2}
+
+
+def test_calibrate_auto_fallback_skips_load_failures(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(probe, "_calibration_candidates",
+                        lambda: ["mlx-community/broken", "mlx-community/good"])
+    calls = []
+
+    def fake_one(hf_id, **_kw):
+        calls.append(hf_id)
+        if hf_id.endswith("broken"):
+            raise probe._CalibrationLoadFailed("load failed", "[calibrate] rung 512 failed")
+        return _ok_result(hf_id)
+
+    monkeypatch.setattr(probe, "_calibrate_one", fake_one)
+    result = probe.calibrate(verbose=False)  # auto-pick
+    assert calls == ["mlx-community/broken", "mlx-community/good"]  # skipped the broken one
+    assert result["hf_id"] == "mlx-community/good"
+
+
+def test_calibrate_explicit_model_does_not_fall_back(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+
+    def fake_one(hf_id, **_kw):
+        raise probe._CalibrationLoadFailed("load failed", "[calibrate] rung 512 failed")
+
+    monkeypatch.setattr(probe, "_calibrate_one", fake_one)
+    # explicit model: surface the error, do NOT substitute another model
+    with pytest.raises(SystemExit, match="rung 512 failed"):
+        probe.calibrate("mlx-community/chosen", verbose=False)
+
+
+def test_calibrate_all_candidates_fail_to_load(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    monkeypatch.setattr(probe, "_calibration_candidates", lambda: ["a/x", "b/y"])
+
+    def fake_one(hf_id, **_kw):
+        raise probe._CalibrationLoadFailed("load failed", "[calibrate] rung 512 failed")
+
+    monkeypatch.setattr(probe, "_calibrate_one", fake_one)
+    with pytest.raises(SystemExit, match="none of the cached models"):
+        probe.calibrate(verbose=False)
+
+
 def _model_info(
     weights_gb: float = 8.0,
     is_causal: bool = True,
