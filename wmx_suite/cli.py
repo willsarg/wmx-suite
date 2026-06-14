@@ -300,6 +300,14 @@ def cmd_benchmark_embeddings(args):
     con = db.connect()
     run_id = db.start_embeddings_run(con, args.model, mlx_version)
 
+    ignore_profile = getattr(args, "ignore_profile", False)
+    from . import profiles
+    if not ignore_profile and profiles.embedding_coeffs(con, args.model, mlx_version):
+        print("  calibration profile: loaded (seeding gate)")
+    else:
+        print("  calibration profile: none — cold start"
+              + (" (--ignore-profile)" if ignore_profile else ""))
+
     aborted = False
 
     def render(event):
@@ -324,7 +332,8 @@ def cmd_benchmark_embeddings(args):
 
     summary = embeddings_probe.sweep(
         con, run_id, args.model, batches=batches, seqs=seqs,
-        repeats=args.repeats, margin_gb=margin_val, on_event=render,
+        repeats=args.repeats, margin_gb=margin_val, mlx_version=mlx_version,
+        ignore_profile=ignore_profile, on_event=render,
     )
 
     if aborted:
@@ -1300,6 +1309,8 @@ def _main_argparse():
                    help="Forward passes per cell (median timing, max memory)")
     p.add_argument("--margin", default=None,
                    help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
+    p.add_argument("--ignore-profile", action="store_true",
+                   help="ignore any stored calibration profile (cold start); still re-fits")
     p.set_defaults(func=cmd_benchmark_embeddings)
 
     args = ap.parse_args()

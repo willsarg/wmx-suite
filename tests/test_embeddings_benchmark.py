@@ -223,7 +223,7 @@ def test_cmd_benchmark_embeddings_persists_and_renders(monkeypatch, tmp_path, ca
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
 
     def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None,
-                   *, on_event=None, persist=True):
+                   *, mlx_version=None, ignore_profile=False, on_event=None, persist=True):
         for (bsz, seq) in [(1, 128), (2, 256)]:
             db.add_embeddings_measurement(con, run_id, batch_size=bsz, seq_len=seq,
                                           os_wired_gb=4.0, peak_gb=2.0,
@@ -256,7 +256,7 @@ def test_cmd_benchmark_embeddings_preflight_abort_exits(monkeypatch, tmp_path, c
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
 
     def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None,
-                   *, on_event=None, persist=True):
+                   *, mlx_version=None, ignore_profile=False, on_event=None, persist=True):
         on_event({"event": "preflight_abort", "note": "host too hot"})
         return {"model": model, "run_id": run_id, "n_cells_measured": 0,
                 "n_cells_skipped": 0, "aborted": True}
@@ -277,7 +277,7 @@ def test_cmd_benchmark_embeddings_worker_error_exits(monkeypatch, tmp_path, caps
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
 
     def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None,
-                   *, on_event=None, persist=True):
+                   *, mlx_version=None, ignore_profile=False, on_event=None, persist=True):
         on_event({"event": "error", "batch": 1, "seq": 128, "note": "worker blew up"})
         return {"model": model, "run_id": run_id, "n_cells_measured": 0,
                 "n_cells_skipped": 0, "error": "worker blew up"}
@@ -513,3 +513,22 @@ def test_sweep_ignore_profile_skips_load_but_still_upserts(monkeypatch, tmp_path
     assert seen["stored"] is None
     assert db.get_embedding_profile(
         con, profiles.embedding_machine_key("org/m", "0.31.2"))["n_points"] >= 4
+
+
+def test_cmd_benchmark_embeddings_passes_mlx_version_and_ignore_flag(monkeypatch, tmp_path, capsys):
+    from wmx_suite import cli, db, embeddings_probe
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
+    captured = {}
+
+    def fake_sweep(con, run_id, model, batches, seqs, repeats, margin_gb=None, *,
+                   mlx_version=None, ignore_profile=False, on_event=None, persist=True):
+        captured["mlx_version"] = mlx_version
+        captured["ignore_profile"] = ignore_profile
+        return {"model": model, "run_id": run_id, "n_cells_measured": 0, "n_cells_skipped": 0}
+
+    monkeypatch.setattr(embeddings_probe, "sweep", fake_sweep)
+    args = SimpleNamespace(model="org/m", batches="1", seqs="128", repeats=1,
+                           margin=None, ignore_profile=True)
+    cli.cmd_benchmark_embeddings(args)
+    assert captured["ignore_profile"] is True
+    assert captured["mlx_version"]  # a real mlx version string was passed through
