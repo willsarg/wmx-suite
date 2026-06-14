@@ -47,12 +47,22 @@ def test_summary_kept_floor():
     assert "kept the safe default" in buf.getvalue()
 
 
-def test_abort_guidance():
+def test_abort_memory_kind():
     c, buf = _c()
-    view.render_abort(c, {"reason": "machine too loaded to calibrate safely."})
+    view.render_abort(c, {"reason": "machine too loaded.", "kind": "memory"})
     out = buf.getvalue()
     assert "Couldn't calibrate" in out
-    assert "machine too loaded" in out
+    assert "free up memory" in out
+
+
+def test_abort_load_kind_suggests_other_model():
+    c, buf = _c()
+    view.render_abort(c, {"reason": "load failed — incompatible checkpoint.",
+                          "kind": "load"})
+    out = buf.getvalue()
+    # a load failure is fixed by a different model, not by freeing memory
+    assert "--model <other>" in out
+    assert "free up memory" not in out
 
 
 def test_color_has_ansi():

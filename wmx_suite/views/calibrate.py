@@ -34,13 +34,27 @@ def render_rung(console, data: dict) -> None:
 
 
 def render_abort(console, data: dict) -> None:
-    """data: reason (str)"""
+    """data: reason (str), kind ("memory"|"load"|"fit")"""
+    kind = data.get("kind", "fit")
+    if kind == "load":
+        # The chosen model failed to load (e.g. an incompatible checkpoint) —
+        # the fix is a different model, not more memory.
+        tries = [
+            ("wmx-suite calibrate --model <other>", "calibrate with a model that loads"),
+            ("wmx-suite search <query>", "find a working build to download"),
+        ]
+    elif kind == "memory":
+        tries = [
+            ("free up memory", "close other apps, then retry"),
+            ("wmx-suite calibrate --model <smaller>", "or calibrate with a smaller model"),
+        ]
+    else:  # fit / unknown
+        tries = [
+            ("wmx-suite calibrate", "run it again (transient measurement noise)"),
+            ("wmx-suite calibrate --model <other>", "or try a different model"),
+        ]
     console.emit(console.guidance(
-        "Couldn't calibrate this machine.",
-        [data["reason"]],
-        [("free up memory", "close other apps, then retry"),
-         ("wmx-suite calibrate --model <smaller>", "or calibrate with a smaller model")],
-    ))
+        "Couldn't calibrate this machine.", [data["reason"]], tries))
 
 
 def render_summary(console, data: dict) -> None:

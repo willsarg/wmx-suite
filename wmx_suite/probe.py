@@ -362,10 +362,10 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
         if con_out is not None:
             con_out.emit(con_out.style("dim", "  " + " ".join(str(x) for x in a)))
 
-    def _abort(test_msg: str, reason: str):
+    def _abort(test_msg: str, reason: str, kind: str = "fit"):
         """Clean guidance for the CLI, original message for programmatic callers."""
         if con_out is not None:
-            _view.render_abort(con_out, {"reason": reason})
+            _view.render_abort(con_out, {"reason": reason, "kind": kind})
             raise SystemExit(1)
         raise SystemExit(test_msg)
 
@@ -380,7 +380,7 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
             f"pass a smaller --model.",
             f"estimated load ({est:.2f} GB) is at/over the safe budget "
             f"({threshold:.2f} GB) — the machine is too loaded, or this model is too "
-            f"big, to calibrate safely.")
+            f"big, to calibrate safely.", kind="memory")
 
     factor, overhead, _ = profiles.cold_start_constants(con)
     model_base = info.weights_gb * factor + overhead
@@ -404,11 +404,13 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
                 f"{model_base:.2f} + slope {slope:.4f}*{ctx/1000:.1f}k) >= threshold "
                 f"{threshold:.2f}GB before rung {ctx}; aborting (free memory and retry).",
                 f"predicted {predicted:.2f} GB at {ctx:,} tok would reach the safe budget "
-                f"({threshold:.2f} GB) before measuring — aborting before any risk.")
+                f"({threshold:.2f} GB) before measuring — aborting before any risk.",
+                kind="memory")
         m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None or m.get("status") != "ok":
             _abort(f"[calibrate] rung {ctx} failed: {(m or {}).get('note', 'no output')}",
-                   f"probe at {ctx:,} tok failed: {(m or {}).get('note', 'no output')}")
+                   f"probe at {ctx:,} tok failed: {(m or {}).get('note', 'no output')}",
+                   kind="load")
         xs_k.append(ctx / 1000)
         ys.append(m["delta"])
         if con_out is not None:
