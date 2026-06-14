@@ -166,21 +166,31 @@ predicted = live_base + model_base + a*(batch*seq) + b*(batch*seq^2)
   Replaced by the measured smallest-cell delta once available.
 - `a`, `b` = linear and quadratic (`seq²`) coefficients.
 
-**Gate logic:**
-- **Cold start** (`< MIN_FIT_POINTS`, e.g. 3, measured cells): use conservative analytic
-  coefficients
-  `a_analytic = num_layers * hidden_size * 2 / 1e9` (= 22*768*2/1e9 ≈ 3.38e-5 GB per
-  `batch*seq` unit) and
-  `b_analytic = num_layers * num_heads * 2 / 1e9` (= 22*12*2/1e9, all-22-layers-global —
-  conservative). These only ever gate the first few small cells, which pass anyway.
-- **Fitted** (`>= MIN_FIT_POINTS`): least-squares fit of
-  `delta = os_wired_gb - cell_baseline` on features `(batch*seq, batch*seq^2)` across all
-  measured cells → `(a_fit, b_fit)`. Use
-  `a = max(a_analytic, max(0.0, a_fit))`, `b = max(b_analytic, max(0.0, b_fit))` — the
-  analytic floor + the `max(0,·)` clamp prevent a noisy/negative fitted coefficient from
-  *lowering* the prediction below the physical floor. Predictions carry a safety factor
-  `PRED_SAFETY = 1.25` applied to the model terms, on top of the always-present
-  `wall − margin` threshold.
+**Gate logic — two distinct constants, by phase (this resolves the over-estimate
+contradiction):**
+- **Cold start** (`< MIN_FIT_POINTS`, default 3, measured cells): gate with the
+  **sum-over-all-layers OVER-estimate** — a safe upper bound when we have no data:
+  `A_COLD = num_layers * hidden_size * 2 / 1e9` (= 22*768*2/1e9 ≈ 3.38e-5 GB per
+  `batch*seq`) and `B_COLD = num_layers * num_heads * 2 / 1e9` (= 22*12*2/1e9 ≈ 5.28e-7 GB
+  per `batch*seq²`). Because the sweep ramps seq from the smallest value, cold start only
+  ever gates the first one or two tiny cells (e.g. `(1,128)` → `B_COLD*16384 ≈ 0.009 GB`),
+  so the over-estimate is harmless here; it is NOT used as a permanent floor.
+- **Fitted** (`>= MIN_FIT_POINTS`): least-squares fit (through the origin, two features) of
+  `delta = os_wired_gb - cell_baseline` on `(batch*seq, batch*seq²)` across all measured
+  cells → `(a_fit, b_fit)`. The fit — built from **real sampler high-water data** — governs.
+  Clamp each coefficient to a **one-layer PHYSICAL FLOOR** (a true lower bound: at least one
+  global layer's attention matrix and one residual-stream copy must be resident at peak),
+  NOT the cold over-estimate:
+  `A_FLOOR = hidden_size * 2 / 1e9` (≈ 1.54e-6), `B_FLOOR = num_heads * 2 / 1e9` (≈ 2.4e-8).
+  `a = max(A_FLOOR, max(0.0, a_fit))`, `b = max(B_FLOOR, max(0.0, b_fit))`. The floor + the
+  `max(0,·)` clamp stop a noisy/near-zero fit from under-predicting below the physical
+  minimum, while letting the fit climb to the real (possibly multi-layer) value. (Using the
+  cold sum-over-layers as the fitted floor was rejected: `B_COLD` predicts ~35 GB at
+  seq 8192 and would permanently skip the high-seq region.)
+- Predictions carry a safety factor `PRED_SAFETY = 1.25` on the model terms, atop the
+  always-present `wall − margin` threshold. The per-row ramp refines the quadratic `b` from
+  progressively larger *safe* cells before extrapolating one doubling-step further, so the
+  fit's `b` reflects real `seq²` growth rather than being guessed from tiny cells.
 - Each prediction extrapolates only to the **next** rung from all prior data (seqs double,
   so the `seq²` term quadruples per step); the row stops at the first predicted breach, so
   we never extrapolate far. Residual risk (a regime change between the last safe rung and
