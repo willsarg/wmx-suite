@@ -23,6 +23,7 @@ def test_embeddings_db_lifecycle(monkeypatch, tmp_path):
     assert len(runs) == 1
     assert runs[0]["model_id"] == "mlx-community/test-modernbert"
     assert runs[0]["mlx_version"] == "0.31.2"
+    assert runs[0]["created_at"]  # populated by _now()
 
     rows = db.get_embeddings_measurements(con, run_id)
     assert len(rows) == 2
@@ -33,6 +34,8 @@ def test_embeddings_db_lifecycle(monkeypatch, tmp_path):
     latest = db.get_latest_embeddings_run(con)
     assert latest["id"] == run_id
 
+    # FK cascade: rows exist now, and deleting the parent run wipes them.
+    assert len(db.get_embeddings_measurements(con, run_id)) == 2
     con.execute("DELETE FROM embeddings_runs WHERE id = ?", (run_id,))
     con.commit()
     assert db.get_embeddings_measurements(con, run_id) == []

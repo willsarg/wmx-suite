@@ -204,6 +204,7 @@ CREATE TABLE IF NOT EXISTS embeddings_runs (
     mlx_version TEXT,
     created_at  TEXT
 );
+
 CREATE TABLE IF NOT EXISTS embeddings_measurements (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         INTEGER NOT NULL,
@@ -211,8 +212,8 @@ CREATE TABLE IF NOT EXISTS embeddings_measurements (
     seq_len        INTEGER NOT NULL,
     os_wired_gb    REAL,
     peak_gb        REAL,
-    throughput_tps REAL,
-    latency_ms     REAL,
+    throughput_tps REAL NOT NULL,
+    latency_ms     REAL NOT NULL,
     FOREIGN KEY (run_id) REFERENCES embeddings_runs(id) ON DELETE CASCADE
 );
 """
@@ -702,7 +703,7 @@ def get_latest_kokoro_baseline(con: sqlite3.Connection) -> dict | None:
     return dict(row) if row else None
 
 
-# --- Embeddings (ModernBERT 2D batch x seq) ---
+# --- Embeddings benchmark (2D batch x seq memory surface) ---
 def start_embeddings_run(con: sqlite3.Connection, model_id: str, mlx_version: str | None) -> int:
     cur = con.execute(
         "INSERT INTO embeddings_runs (model_id, mlx_version, created_at) VALUES (?, ?, ?)",
