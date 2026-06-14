@@ -59,7 +59,8 @@ class TestKokoroTtfaWorkerLogic(unittest.TestCase):
     @patch("mlx.core.get_peak_memory")
     @patch("wmx_suite.system.wired_gb")
     @patch("wmx_suite.system.read_limits")
-    def test_worker_generation_normal(self, mock_read_limits, mock_wired_gb, mock_get_peak, mock_reset_peak, mock_clear_cache, mock_tts_cls):
+    @patch("wmx_suite.system.sample_settled_baseline", return_value=2.0)
+    def test_worker_generation_normal(self, mock_settled, mock_read_limits, mock_wired_gb, mock_get_peak, mock_reset_peak, mock_clear_cache, mock_tts_cls):
         # Setup mock limits: total 16GB, wall 10GB, wired 2GB. Margin 2.0GB means threshold is 8.0GB
         mock_limits = MagicMock()
         mock_limits.wired_now_gb = 2.0
@@ -100,16 +101,20 @@ class TestKokoroTtfaWorkerLogic(unittest.TestCase):
     @patch("kokoro_mlx.KokoroTTS")
     @patch("wmx_suite.system.wired_gb")
     @patch("wmx_suite.system.read_limits")
-    def test_worker_safeguard_triggered(self, mock_read_limits, mock_wired_gb, mock_tts_cls):
+    @patch("wmx_suite.system.sample_settled_baseline")
+    def test_worker_safeguard_triggered(self, mock_settled, mock_read_limits,
+                                        mock_wired_gb, mock_tts_cls):
         # Setup mock limits: total 16GB, wall 10GB, wired 2GB. Margin 2.0GB => threshold is 8.0GB
         mock_limits = MagicMock()
         mock_limits.wired_now_gb = 2.0
         mock_limits.safe_threshold_gb.return_value = 8.0
         mock_read_limits.return_value = mock_limits
+        mock_settled.return_value = 2.0  # pre-flight settled baseline (2.0 + 0.5 < 8.0 -> safe)
 
-        # First rung checks: wired memory starts at 3.0GB (runs normally).
-        # Second rung checks: wired memory spikes to 8.5GB (safeguard triggers).
-        mock_wired_gb.side_effect = [3.0, 8.5]  # precheck for rung 1, precheck for rung 2
+        # Per-step over_threshold() reads, in order:
+        #   rung 1 pre-check (3.0, ok), rung 1 pre-non-streaming sub-step (3.0, ok),
+        #   rung 2 pre-check (8.5 >= 8.0 -> safeguard).
+        mock_wired_gb.side_effect = [3.0, 3.0, 8.5]
 
         # Setup model mock
         mock_tts = MagicMock()

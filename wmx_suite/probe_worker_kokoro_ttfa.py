@@ -68,25 +68,24 @@ def main() -> None:
         print(json.dumps({"status": "error", "note": "Invalid lengths argument"}), flush=True)
         sys.exit(1)
 
+    # Pre-flight BEFORE importing mlx/kokoro, so the Metal init can't cross the wall first.
+    from wmx_suite import kokoro_safety
+    threshold, _baseline, safe = kokoro_safety.preflight(args.margin)
+    if not safe:
+        print(json.dumps({
+            "status": "error",
+            "note": (f"Pre-flight aborted: settled baseline + "
+                     f"{kokoro_safety.MODEL_WEIGHT_EST_GB} GB model-load headroom would reach "
+                     f"the safe threshold ({threshold:.2f} GB); model not loaded."),
+        }), flush=True)
+        sys.exit(0)
+
     try:
         import mlx.core as mx
         from kokoro_mlx import KokoroTTS
-        from wmx_suite.system import read_limits, wired_gb
     except ImportError as e:
         print(json.dumps({"status": "error", "note": f"Import failed: {e}"}), flush=True)
         sys.exit(1)
-
-    # Resolve limits and safe threshold
-    limits = read_limits()
-    threshold = limits.safe_threshold_gb(args.margin)
-
-    # Pre-flight check
-    if limits.wired_now_gb >= threshold:
-        print(json.dumps({
-            "status": "error",
-            "note": f"Pre-flight aborted: System wired memory ({limits.wired_now_gb:.2f} GB) is already at or above safe threshold ({threshold:.2f} GB)."
-        }), flush=True)
-        sys.exit(0)
 
     # 1. Load model
     try:
@@ -110,16 +109,11 @@ def main() -> None:
 
     # 3. Sweep over lengths
     for length in lengths:
-        # Check active RAM safeguard
-        try:
-            current_wired = wired_gb()
-        except Exception:
-            current_wired = limits.wired_now_gb  # fallback
-            
-        if current_wired >= threshold:
+        # Fresh per-rung safeguard (a failed read counts as unsafe).
+        if kokoro_safety.over_threshold(threshold):
             print(json.dumps({
                 "status": "safeguard_triggered",
-                "note": f"Active memory safeguard triggered: System wired memory ({current_wired:.2f} GB) reached safe threshold ({threshold:.2f} GB)."
+                "note": f"Active memory safeguard: OS-wired memory reached the safe threshold ({threshold:.2f} GB)."
             }), flush=True)
             break
 
@@ -153,8 +147,18 @@ def main() -> None:
 
             chunk_dur = len(first_chunk) / tts.SAMPLE_RATE
 
-            # Measure Non-Streaming Total Time
+            # Per-sub-step safeguard: don't start the non-streaming pass if the streaming
+            # pass already pushed wired memory to the threshold.
             mx.clear_cache()
+            if kokoro_safety.over_threshold(threshold):
+                print(json.dumps({
+                    "status": "safeguard_triggered",
+                    "note": f"Active memory safeguard before non-streaming pass: OS-wired memory reached the safe threshold ({threshold:.2f} GB)."
+                }), flush=True)
+                success = False
+                break
+
+            # Measure Non-Streaming Total Time
             time.sleep(0.05)
             t_start = time.perf_counter()
             try:

@@ -30,9 +30,13 @@ from .system import read_limits, sample_settled_baseline
 
 def _configured_margin(value=None) -> float:
     try:
-        return config.margin_gb(value)
+        margin = config.margin_gb(value)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    if margin == 0:
+        print("[warning] margin is 0 GB — the safe threshold equals the crash wall, with "
+              "no cushion. Crossing it can hard-lock the machine.", file=sys.stderr)
+    return margin
 
 
 def _stream_worker(

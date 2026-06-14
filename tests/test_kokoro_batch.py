@@ -57,7 +57,9 @@ class TestKokoroBatchWorkerLogic(unittest.TestCase):
     @patch("mlx.core.clear_cache")
     @patch("mlx.core.reset_peak_memory")
     @patch("mlx.core.get_peak_memory")
-    def test_worker_generation(self, mock_get_peak, mock_reset_peak, mock_clear_cache, mock_generate, mock_tts_cls):
+    @patch("wmx_suite.system.wired_gb", return_value=2.0)
+    @patch("wmx_suite.kokoro_safety.preflight", return_value=(100.0, 2.0, True))
+    def test_worker_generation(self, mock_preflight, mock_wired, mock_get_peak, mock_reset_peak, mock_clear_cache, mock_generate, mock_tts_cls):
         # Setup mocks
         mock_tts = MagicMock()
         mock_tts_cls.from_pretrained.return_value = mock_tts
@@ -84,4 +86,33 @@ class TestKokoroBatchWorkerLogic(unittest.TestCase):
                 # - 2 iterations for batch_size=2 (2 generate calls per iteration = 4 calls)
                 # Total expected calls = 1 + 2 + 4 = 7 calls
                 self.assertEqual(mock_generate.call_count, 7)
+                mock_tts.close.assert_called_once()
+
+    @patch("kokoro_mlx.KokoroTTS")
+    @patch("kokoro_mlx.generate.generate")
+    @patch("mlx.core.clear_cache")
+    @patch("mlx.core.reset_peak_memory")
+    @patch("mlx.core.get_peak_memory")
+    @patch("wmx_suite.system.wired_gb", return_value=7.0)
+    @patch("wmx_suite.kokoro_safety.preflight", return_value=(8.0, 2.0, True))
+    def test_worker_predictively_skips_unsafe_concurrent_rung(
+        self, mock_preflight, mock_wired, mock_get_peak, mock_reset_peak,
+        mock_clear_cache, mock_generate, mock_tts_cls):
+        """RULE #1: a batch rung whose PREDICTED concurrent peak would breach the wall must
+        be skipped before it runs, even though current wired memory is below threshold."""
+        mock_tts = MagicMock()
+        mock_tts_cls.from_pretrained.return_value = mock_tts
+        mock_generate.return_value = MagicMock()
+        mock_get_peak.return_value = 1.0 * 1e9
+
+        # threshold 8.0, baseline 2.0, current wired 7.0 (under threshold).
+        # batch 1 runs: hi=7.0 -> per_call = (7.0-2.0)/1 = 5.0 GB/call.
+        # batch 2 predicted = 7.0 + 5.0*2 = 17.0 >= 8.0 -> SKIP before running.
+        from wmx_suite import probe_worker_kokoro_batch
+        with patch("sys.argv", ["probe_worker_kokoro_batch.py", "--model", "test-model",
+                                "--batch-sizes", "1,2", "--repeats", "1"]):
+            with patch("sys.exit"):
+                probe_worker_kokoro_batch.main()
+                # warmup (1) + batch 1 (1) = 2; batch 2 never runs.
+                self.assertEqual(mock_generate.call_count, 2)
                 mock_tts.close.assert_called_once()

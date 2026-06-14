@@ -19,27 +19,27 @@ def main() -> None:
     ap.add_argument("--margin", type=float, default=2.0)
     args = ap.parse_args()
 
+    # Pre-flight BEFORE importing mlx/kokoro, so the Metal init can't cross the wall first.
+    # Reserves model-load headroom on top of the settled baseline.
+    from wmx_suite import kokoro_safety
+    threshold, baseline_gb, safe = kokoro_safety.preflight(args.margin)
+    if not safe:
+        print(json.dumps({
+            "status": "error",
+            "note": (f"Pre-flight aborted: settled baseline ({baseline_gb:.2f} GB) + "
+                     f"{kokoro_safety.MODEL_WEIGHT_EST_GB} GB model-load headroom would reach "
+                     f"the safe threshold ({threshold:.2f} GB); model not loaded."),
+        }), flush=True)
+        sys.exit(0)
+
     try:
         import mlx.core as mx
         from kokoro_mlx import KokoroTTS
         from kokoro_mlx.generate import generate
-        from wmx_suite.system import read_limits, sample_settled_baseline
+        from wmx_suite.system import sample_settled_baseline
     except ImportError as e:
         print(json.dumps({"status": "error", "note": f"Import failed: {e}"}), flush=True)
         sys.exit(1)
-
-    # 1. Settle and measure baseline system wired memory
-    limits = read_limits()
-    baseline_gb = sample_settled_baseline(settle=0.5, n=3, interval=0.2)
-
-    # Check pre-flight
-    threshold = limits.safe_threshold_gb(args.margin)
-    if baseline_gb >= threshold:
-        print(json.dumps({
-            "status": "error",
-            "note": f"Pre-flight aborted: System baseline memory ({baseline_gb:.2f} GB) is already at or above safe threshold ({threshold:.2f} GB)."
-        }), flush=True)
-        sys.exit(0)
 
     # 2. Load model and run warm synthesis
     try:

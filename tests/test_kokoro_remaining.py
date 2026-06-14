@@ -84,7 +84,9 @@ class TestKokoroRemainingWorkerLogic(unittest.TestCase):
     @patch("kokoro_mlx.KokoroTTS")
     @patch("kokoro_mlx.generate.generate")
     @patch("mlx.core.clear_cache")
-    def test_voice_worker(self, mock_clear, mock_generate, mock_tts_cls):
+    @patch("wmx_suite.kokoro_safety.over_threshold", return_value=False)
+    @patch("wmx_suite.kokoro_safety.preflight", return_value=(100.0, 2.0, True))
+    def test_voice_worker(self, mock_preflight, mock_over, mock_clear, mock_generate, mock_tts_cls):
         mock_tts = MagicMock()
         mock_tts_cls.from_pretrained.return_value = mock_tts
         mock_tts.list_voices.return_value = ["af_heart", "am_adam"]
@@ -101,7 +103,10 @@ class TestKokoroRemainingWorkerLogic(unittest.TestCase):
     @patch("kokoro_mlx.generate.generate")
     @patch("mlx.core.clear_cache")
     @patch("mlx.core.get_peak_memory")
-    def test_cache_worker(self, mock_peak, mock_clear, mock_generate, mock_tts_cls):
+    @patch("wmx_suite.system.wired_gb", return_value=2.0)
+    @patch("wmx_suite.kokoro_safety.over_threshold", return_value=False)
+    @patch("wmx_suite.kokoro_safety.preflight", return_value=(100.0, 2.0, True))
+    def test_cache_worker(self, mock_preflight, mock_over, mock_wired, mock_peak, mock_clear, mock_generate, mock_tts_cls):
         mock_tts = MagicMock()
         mock_tts_cls.from_pretrained.return_value = mock_tts
         mock_tts.list_voices.return_value = ["af_heart", "am_adam"]

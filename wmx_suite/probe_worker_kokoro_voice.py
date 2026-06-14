@@ -25,26 +25,25 @@ def main() -> None:
     ap.add_argument("--margin", type=float, default=2.0)
     args = ap.parse_args()
 
+    # Pre-flight BEFORE importing mlx/kokoro, so the Metal init can't cross the wall first.
+    from wmx_suite import kokoro_safety
+    threshold, _baseline, safe = kokoro_safety.preflight(args.margin)
+    if not safe:
+        print(json.dumps({
+            "status": "error",
+            "note": (f"Pre-flight aborted: settled baseline + "
+                     f"{kokoro_safety.MODEL_WEIGHT_EST_GB} GB model-load headroom would reach "
+                     f"the safe threshold ({threshold:.2f} GB); model not loaded."),
+        }), flush=True)
+        sys.exit(0)
+
     try:
         import mlx.core as mx
         from kokoro_mlx import KokoroTTS
         from kokoro_mlx.generate import generate
-        from wmx_suite.system import read_limits, wired_gb
     except ImportError as e:
         print(json.dumps({"status": "error", "note": f"Import failed: {e}"}), flush=True)
         sys.exit(1)
-
-    # Resolve limits and safe threshold
-    limits = read_limits()
-    threshold = limits.safe_threshold_gb(args.margin)
-
-    # Pre-flight check
-    if limits.wired_now_gb >= threshold:
-        print(json.dumps({
-            "status": "error",
-            "note": f"Pre-flight aborted: System wired memory ({limits.wired_now_gb:.2f} GB) is already at or above safe threshold ({threshold:.2f} GB)."
-        }), flush=True)
-        sys.exit(0)
 
     # 1. Load model
     try:
@@ -84,17 +83,18 @@ def main() -> None:
         sys.exit(1)
 
     # 3. Runs for each condition
-    for r in range(max(1, args.repeats)):
-        # Active RAM check
-        try:
-            current_wired = wired_gb()
-        except Exception:
-            current_wired = limits.wired_now_gb
-        if current_wired >= threshold:
+    def _safeguard(stage: str) -> bool:
+        """Fresh per-step check (failed read = unsafe). Emits + signals stop if at/over."""
+        if kokoro_safety.over_threshold(threshold):
             print(json.dumps({
                 "status": "safeguard_triggered",
-                "note": f"Active memory safeguard triggered during voice test: System wired memory ({current_wired:.2f} GB) reached safe threshold ({threshold:.2f} GB)."
+                "note": f"Active memory safeguard {stage}: OS-wired memory reached the safe threshold ({threshold:.2f} GB)."
             }), flush=True)
+            return True
+        return False
+
+    for r in range(max(1, args.repeats)):
+        if _safeguard("before voice repeat"):
             break
 
         # A. Static same-voice baseline
@@ -128,6 +128,9 @@ def main() -> None:
             "duration_ms": round(static_duration, 2)
         }), flush=True)
 
+        if _safeguard("before warm-switch step"):
+            break
+
         # B. Warm Switch (cached)
         # Warmup/populate voice_a cache
         _ = generate(
@@ -158,6 +161,9 @@ def main() -> None:
             "voice_to": args.voice_b,
             "duration_ms": round(warm_duration, 2)
         }), flush=True)
+
+        if _safeguard("before cold-load step"):
+            break
 
         # C. Cold Load (clear cache, load from disk)
         tts._voices._cache.clear()

@@ -127,7 +127,10 @@ class TestKokoroWorkerLogic(unittest.TestCase):
     @patch("mlx.core.clear_cache")
     @patch("mlx.core.reset_peak_memory")
     @patch("mlx.core.get_peak_memory")
-    def test_worker_generation(self, mock_get_peak, mock_reset_peak, mock_clear_cache, mock_tts_cls):
+    @patch("wmx_suite.system.wired_gb", return_value=2.0)
+    @patch("wmx_suite.kokoro_safety.over_threshold", return_value=False)
+    @patch("wmx_suite.kokoro_safety.preflight", return_value=(100.0, 2.0, True))
+    def test_worker_generation(self, mock_preflight, mock_over, mock_wired, mock_get_peak, mock_reset_peak, mock_clear_cache, mock_tts_cls):
         # Setup mocks
         mock_tts = MagicMock()
         mock_tts_cls.from_pretrained.return_value = mock_tts

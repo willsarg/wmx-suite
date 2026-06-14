@@ -10,6 +10,7 @@ import argparse
 import concurrent.futures
 import json
 import statistics
+import threading
 import time
 import sys
 
@@ -49,26 +50,26 @@ def main() -> None:
         print(json.dumps({"status": "error", "note": "Invalid batch-sizes argument"}), flush=True)
         sys.exit(1)
 
+    # Pre-flight BEFORE importing mlx/kokoro, so the Metal init can't cross the wall first.
+    from wmx_suite import kokoro_safety
+    threshold, baseline, safe = kokoro_safety.preflight(args.margin)
+    if not safe:
+        print(json.dumps({
+            "status": "error",
+            "note": (f"Pre-flight aborted: settled baseline + "
+                     f"{kokoro_safety.MODEL_WEIGHT_EST_GB} GB model-load headroom would reach "
+                     f"the safe threshold ({threshold:.2f} GB); model not loaded."),
+        }), flush=True)
+        sys.exit(0)
+
     try:
         import mlx.core as mx
         from kokoro_mlx import KokoroTTS
         from kokoro_mlx.generate import generate
-        from wmx_suite.system import read_limits, wired_gb
+        from wmx_suite.system import wired_gb
     except ImportError as e:
         print(json.dumps({"status": "error", "note": f"Import failed: {e}"}), flush=True)
         sys.exit(1)
-
-    # Resolve limits and safe threshold
-    limits = read_limits()
-    threshold = limits.safe_threshold_gb(args.margin)
-
-    # Pre-flight check: refuse to start if baseline already exceeds threshold
-    if limits.wired_now_gb >= threshold:
-        print(json.dumps({
-            "status": "error",
-            "note": f"Pre-flight aborted: System wired memory ({limits.wired_now_gb:.2f} GB) is already at or above safe threshold ({threshold:.2f} GB)."
-        }), flush=True)
-        sys.exit(0)
 
     # 1. Load model
     try:
@@ -97,7 +98,25 @@ def main() -> None:
         print(json.dumps({"status": "error", "note": f"Warmup run failed: {e}"}), flush=True)
         sys.exit(1)
 
-    # 3. Sweep over batch sizes
+    def run_one_generation(text: str):
+        # Bypasses the KokoroTTS instance lock and calls the underlying generate() directly
+        # from multiple threads. Thread-safety of concurrent generate() is an ASSUMPTION;
+        # no race has been observed. Plain Python strings keep MLX allocations in-thread.
+        return generate(
+            text=text,
+            model=tts._model,
+            config=tts._config,
+            voice_manager=tts._voices,
+            voice=args.voice,
+            phonemizer=phonemizer
+        )
+
+    # 3. Sweep over batch sizes.
+    # The between-rung check alone cannot catch the transient spike DURING concurrent
+    # synthesis, so we PREDICT each rung's peak = current wired + (measured worst-case
+    # per-call transient) x concurrency, and refuse the rung if that would breach the wall.
+    # per_call_gb is learned from each rung's measured high-water (a background sampler).
+    per_call_gb = 0.0
     for batch_size in batch_sizes:
         if batch_size <= 0:
             continue
@@ -105,16 +124,20 @@ def main() -> None:
             # Limit to the max available sentences
             batch_size = len(BENCHMARK_SENTENCES)
 
-        # Check active RAM safeguard
+        # Fresh residency (a failed read counts as unsafe), then PREDICT the concurrent peak.
         try:
             current_wired = wired_gb()
         except Exception:
-            current_wired = limits.wired_now_gb  # fallback
-            
-        if current_wired >= threshold:
+            current_wired = float("inf")
+        predicted_peak = kokoro_safety.predicted_concurrent_peak(
+            current_wired, per_call_gb, batch_size)
+        if current_wired >= threshold or predicted_peak >= threshold:
             print(json.dumps({
                 "status": "safeguard_triggered",
-                "note": f"Active memory safeguard triggered: System wired memory ({current_wired:.2f} GB) reached safe threshold ({threshold:.2f} GB)."
+                "note": (f"Active memory safeguard: predicted concurrent peak "
+                         f"{predicted_peak:.2f} GB (current {current_wired:.2f} + "
+                         f"{batch_size}x{per_call_gb:.3f} GB/call) would reach the safe "
+                         f"threshold ({threshold:.2f} GB) at batch {batch_size}.")
             }), flush=True)
             break
 
@@ -124,59 +147,58 @@ def main() -> None:
         run_times = []
         run_cpss = []
         run_peaks = []
-
         success = True
 
-        def run_one_generation(text: str):
-            # Bypasses the KokoroTTS instance lock and calls the underlying generate()
-            # directly from multiple threads.  Thread-safety of concurrent generate() is
-            # an ASSUMPTION (the MLX Metal runtime and kokoro_mlx internals are not
-            # formally documented as thread-safe); no race has been observed in practice,
-            # but this is not verified.  Plain Python strings are passed to keep all MLX
-            # array allocations in-thread.
-            return generate(
-                text=text,
-                model=tts._model,
-                config=tts._config,
-                voice_manager=tts._voices,
-                voice=args.voice,
-                phonemizer=phonemizer
-            )
+        # Background sampler captures the in-rung concurrent transient high-water, which
+        # feeds per_call_gb for gating the NEXT (larger) rung.
+        hi = [current_wired]
+        stop = [False]
 
-        for _ in range(max(1, args.repeats)):
-            mx.clear_cache()
-            mx.reset_peak_memory()
-            time.sleep(0.05)  # small settle
+        def _sampler():
+            while not stop[0]:
+                try:
+                    hi[0] = max(hi[0], wired_gb())
+                except Exception:
+                    pass
+                time.sleep(0.02)
 
-            t0 = time.perf_counter()
-            try:
-                # NOTE: the wired-memory safeguard above runs only BETWEEN rungs, not
-                # during a batch.  Concurrent synthesis transiently multiplies per-call
-                # allocations, so a brief spike above the between-rung check is possible
-                # before the next rung's check catches it.  This is acceptable here
-                # because Kokoro is a small (82 M-param), static-footprint model whose
-                # per-call transient allocation is low; it would be unsafe for larger
-                # models or dynamically-growing workloads.
-                with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
-                    futures = [executor.submit(run_one_generation, text) for text in sentences_to_use]
-                    # Wait for all thread jobs to finish
-                    _ = [fut.result() for fut in futures]
-                t1 = time.perf_counter()
-            except Exception as e:
-                print(json.dumps({"status": "error", "note": f"Generation failed at batch size {batch_size}: {e}"}), flush=True)
-                success = False
-                break
+        sampler_thread = threading.Thread(target=_sampler, daemon=True)
+        sampler_thread.start()
+        try:
+            for _ in range(max(1, args.repeats)):
+                mx.clear_cache()
+                mx.reset_peak_memory()
+                time.sleep(0.05)  # small settle
 
-            elapsed = t1 - t0
-            if elapsed <= 0:
-                elapsed = 0.001
+                t0 = time.perf_counter()
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+                        futures = [executor.submit(run_one_generation, text) for text in sentences_to_use]
+                        _ = [fut.result() for fut in futures]
+                    t1 = time.perf_counter()
+                except Exception as e:
+                    print(json.dumps({"status": "error", "note": f"Generation failed at batch size {batch_size}: {e}"}), flush=True)
+                    success = False
+                    break
 
-            run_times.append(elapsed)
-            run_cpss.append(total_chars / elapsed)
-            run_peaks.append(mx.get_peak_memory() / 1e9)  # GB
+                elapsed = t1 - t0
+                if elapsed <= 0:
+                    elapsed = 0.001
+
+                run_times.append(elapsed)
+                run_cpss.append(total_chars / elapsed)
+                run_peaks.append(mx.get_peak_memory() / 1e9)  # GB
+        finally:
+            stop[0] = True
+            sampler_thread.join(timeout=0.2)
 
         if not success:
             continue
+
+        # Learn the worst-case per-call transient from this rung's measured high-water so
+        # the gate for the next (larger) batch reflects real concurrent cost.
+        rung_delta = max(0.0, hi[0] - baseline)
+        per_call_gb = max(per_call_gb, rung_delta / batch_size)
 
         # Emit median values for the rung
         print(json.dumps({
