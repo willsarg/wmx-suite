@@ -78,23 +78,26 @@ def main() -> None:
     t = threading.Thread(target=sampler, daemon=True)
     t.start()
 
-    # Warmup (compile Metal graphs); not measured.
-    out = model(input_ids, attention_mask=attention_mask)
-    mx.eval(out.last_hidden_state)
-    mx.clear_cache()
-
-    compute_times = []
-    peaks = []
-    for _ in range(max(1, args.repeats)):
-        mx.clear_cache()
-        mx.reset_peak_memory()
-        t0 = time.perf_counter()
+    # Always stop the sampler, even if the forward pass raises (e.g. OOM mid-run), so the
+    # thread can't outlive the work — matches probe_worker.py's discipline.
+    try:
+        # Warmup (compile Metal graphs); not measured.
         out = model(input_ids, attention_mask=attention_mask)
         mx.eval(out.last_hidden_state)
-        compute_times.append(time.perf_counter() - t0)
-        peaks.append(mx.get_peak_memory() / 1e9)
+        mx.clear_cache()
 
-    stop[0] = True
+        compute_times = []
+        peaks = []
+        for _ in range(max(1, args.repeats)):
+            mx.clear_cache()
+            mx.reset_peak_memory()
+            t0 = time.perf_counter()
+            out = model(input_ids, attention_mask=attention_mask)
+            mx.eval(out.last_hidden_state)
+            compute_times.append(time.perf_counter() - t0)
+            peaks.append(mx.get_peak_memory() / 1e9)
+    finally:
+        stop[0] = True
 
     compute_time = statistics.median(compute_times)
     throughput_tps = (args.batch * args.seq) / compute_time if compute_time > 0 else 0.0
