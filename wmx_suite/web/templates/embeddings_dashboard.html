@@ -39,8 +39,8 @@
                     <td><code>{{ r.mlx_version or 'unknown' }}</code></td>
                     <td>{{ r.created_at }}</td>
                     <td>{{ r.n_cells }}</td>
-                    <td style="color: var(--neon-cyan); font-weight: 600;">{{ r.max_wired_gb }} GB</td>
-                    <td style="color: var(--neon-purple); font-weight: 600;">{{ r.max_tps | int }}</td>
+                    <td style="color: var(--neon-cyan); font-weight: 600;">{{ (r.max_wired_gb ~ ' GB') if r.max_wired_gb is not none else 'n/a' }}</td>
+                    <td style="color: var(--neon-purple); font-weight: 600;">{{ r.max_tps if r.max_tps is not none else 'n/a' }}</td>
                     <td>
                         <a href="{{ url_for('embeddings_run_detail', run_id=r.id) }}" class="btn btn-outline" style="padding: 0.4rem 0.8rem; font-size: 0.8rem; border-radius: 8px;">View Run</a>
                     </td>

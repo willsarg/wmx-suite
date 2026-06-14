@@ -75,6 +75,10 @@ def client(monkeypatch, tmp_path):
     baseline_run_id = db.start_kokoro_baseline_run(con, "mlx-community/Kokoro-82M-bf16", "0.20.0")
     db.add_kokoro_baseline_measurement(con, baseline_run_id, 1.0, 1.85, 0.85)
 
+    emb_run_id = db.start_embeddings_run(con, "mlx-community/nomicai-modernbert-embed-base-bf16", "0.31.2")
+    db.add_embeddings_measurement(con, emb_run_id, 1, 128, 4.0, 2.0, 100.0, 5.0)
+    db.add_embeddings_measurement(con, emb_run_id, 2, 256, 4.6, 2.3, 220.0, 9.0)
+
     con.close()
 
     
@@ -191,23 +195,20 @@ def test_kokoro_baseline_route(client):
     assert "mlx-community/Kokoro-82M-bf16" in html
 
 
-def test_embeddings_routes(monkeypatch, tmp_path):
-    from wmx_suite import db
-    from wmx_suite.web.app import create_app
+def test_embeddings_dashboard_route(client):
+    rv = client.get("/embeddings")
+    assert rv.status_code == 200
+    assert "mlx-community/nomicai-modernbert-embed-base-bf16" in rv.data.decode()
 
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
-    con = db.connect()
-    run_id = db.start_embeddings_run(con, "mlx-community/test", "0.31.2")
-    db.add_embeddings_measurement(con, run_id, batch_size=1, seq_len=128,
-                                  os_wired_gb=4.0, peak_gb=2.0,
-                                  throughput_tps=100.0, latency_ms=5.0)
 
-    app = create_app()
-    app.config.update(TESTING=True)
-    client = app.test_client()
+def test_embeddings_run_detail_route(client):
+    rv = client.get("/embeddings/run/1")
+    assert rv.status_code == 200
+    html = rv.data.decode()
+    assert "128" in html and "256" in html  # seq columns in the grid
 
-    assert client.get("/embeddings").status_code == 200
-    assert client.get(f"/embeddings/run/{run_id}").status_code == 200
+
+def test_embeddings_run_detail_not_found(client):
     assert client.get("/embeddings/run/99999").status_code == 404
 
 

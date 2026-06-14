@@ -471,8 +471,8 @@ def create_app():
                 "mlx_version": r["mlx_version"],
                 "created_at": r["created_at"],
                 "n_cells": len(m),
-                "max_wired_gb": round(max((x["os_wired_gb"] for x in m), default=0.0), 2),
-                "max_tps": round(max((x["throughput_tps"] for x in m), default=0.0), 0),
+                "max_wired_gb": round(max(x["os_wired_gb"] for x in m), 2) if m else None,
+                "max_tps": int(round(max(x["throughput_tps"] for x in m), 0)) if m else None,
             })
         return render_template("embeddings_dashboard.html", runs=decorated, limits=limits)
 
