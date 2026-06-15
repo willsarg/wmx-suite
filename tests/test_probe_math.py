@@ -24,6 +24,43 @@ def test_summarize_worker_error_empty():
     assert "no result" in probe._summarize_worker_error("")
 
 
+# ---- speed presets -------------------------------------------------------
+
+def test_resolve_speed_standard_is_current_defaults():
+    # regression guard: standard must be byte-identical to today's behavior
+    ramp, repeats = probe.resolve_speed("standard")
+    assert ramp == probe.DEFAULT_RAMP
+    assert repeats == probe.DEFAULT_REPEATS
+
+
+def test_resolve_speed_quick_spans_curve_single_repeat():
+    # quick gets its speed from repeats=1 (the gate prunes high rungs anyway), while
+    # keeping a mid-dense ramp so the fit still spans the super-linear memory bend —
+    # cutting rungs instead would bias the ceiling optimistically.
+    ramp, repeats = probe.resolve_speed("quick")
+    assert ramp == [2048, 8192, 16384, 32768, 65536, 131072]
+    assert repeats == 1
+
+
+def test_resolve_speed_full_is_dense_ramp_three_repeats():
+    ramp, repeats = probe.resolve_speed("full")
+    assert ramp == [2048, 4096, 8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]
+    assert repeats == 3
+    assert len(ramp) > len(probe.DEFAULT_RAMP)  # finer than standard
+
+
+def test_resolve_speed_explicit_repeats_overrides_preset():
+    # preset sets the repeats default; an explicit --repeats wins, ramp stays from preset
+    ramp, repeats = probe.resolve_speed("quick", repeats=5)
+    assert ramp == [2048, 8192, 16384, 32768, 65536, 131072]
+    assert repeats == 5
+
+
+def test_resolve_speed_unknown_raises():
+    with pytest.raises(ValueError):
+        probe.resolve_speed("turbo")
+
+
 def _ok_result(hf_id):
     return {"hf_id": hf_id, "machine_key": ("M", 1, 15), "intercept_gb": 1.0,
             "measured_overhead_gb": 0.5, "fixed_overhead_gb": 1.0,

@@ -343,7 +343,7 @@ def test_characterize_uses_environment_margin(monkeypatch):
     seen = {}
     monkeypatch.setenv(config.MARGIN_ENV, "3")
 
-    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, console=None):
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None):
         seen.update(
             hf_id=hf_id,
             margin_gb=margin_gb,
@@ -357,11 +357,56 @@ def test_characterize_uses_environment_margin(monkeypatch):
             hf_id="mlx-community/test",
             margin=None,
             min_probe=False,
-            repeats=3,
+            speed="standard",
+            repeats=None,
         )
     )
 
     assert seen["margin_gb"] == 3.0
+
+
+def test_characterize_speed_defaults_to_standard():
+    args = cli._build_parser().parse_args(["characterize", "mlx-community/test"])
+    assert args.speed == "standard"
+    assert args.repeats is None  # unset → preset supplies the default
+
+
+def test_characterize_rejects_unknown_speed():
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(
+            ["characterize", "mlx-community/test", "--speed", "turbo"])
+
+
+def test_characterize_quick_passes_preset_ramp_and_repeats(monkeypatch):
+    seen = {}
+
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None):
+        seen.update(repeats=repeats, ramp=ramp)
+
+    monkeypatch.setattr(cli.probe, "characterize", characterize)
+    cli.cmd_characterize(
+        _ns(hf_id="mlx-community/test", margin=None, min_probe=False,
+            speed="quick", repeats=None)
+    )
+
+    assert seen["ramp"] == [2048, 8192, 16384, 32768, 65536, 131072]
+    assert seen["repeats"] == 1
+
+
+def test_characterize_explicit_repeats_overrides_speed(monkeypatch):
+    seen = {}
+
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None):
+        seen.update(repeats=repeats, ramp=ramp)
+
+    monkeypatch.setattr(cli.probe, "characterize", characterize)
+    cli.cmd_characterize(
+        _ns(hf_id="mlx-community/test", margin=None, min_probe=False,
+            speed="quick", repeats=1)
+    )
+
+    assert seen["ramp"] == [2048, 8192, 16384, 32768, 65536, 131072]  # ramp still from preset
+    assert seen["repeats"] == 1  # explicit override wins
 
 
 def test_run_warns_when_fit_is_stale(monkeypatch, capsys):

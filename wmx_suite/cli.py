@@ -338,8 +338,9 @@ def cmd_show(args):
 
 def cmd_characterize(args):
     margin = _configured_margin(args.margin)
+    ramp, repeats = probe.resolve_speed(args.speed, repeats=args.repeats)
     probe.characterize(models.resolve_hf_id(args.hf_id), margin_gb=margin,
-                       allow_min_probe=args.min_probe, repeats=args.repeats,
+                       allow_min_probe=args.min_probe, repeats=repeats, ramp=ramp,
                        console=args.console)
 
 
@@ -1435,9 +1436,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-probe", action="store_true",
                    help="for borderline models, run a supervised 512-token probe to measure "
                         "the true base instead of refusing on the pessimistic estimate")
-    p.add_argument("--repeats", type=int, default=probe.DEFAULT_REPEATS,
+    p.add_argument("--speed", choices=list(probe.SPEED_PRESETS),
+                   default=probe.DEFAULT_SPEED,
+                   help="how thorough the ramp is: 'quick' (fewer rungs, faster), "
+                        "'standard' (default), or 'full' (denser ramp, finer fit)")
+    p.add_argument("--repeats", type=int, default=None,
                    help="isolated runs per context rung; the median high-water is used "
-                        "(smooths prefill-transient jitter)")
+                        "(smooths prefill-transient jitter). Overrides the --speed preset.")
     p.set_defaults(func=cmd_characterize)
     sub.add_parser("list").set_defaults(func=cmd_list)
     p = sub.add_parser("calibrate", help="measure this machine's cold-start overhead constant")

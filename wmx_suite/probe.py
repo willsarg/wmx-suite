@@ -31,6 +31,35 @@ DEFAULT_RAMP = [2048, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
 CALIBRATE_RAMP = [512, 2048]  # two small safe rungs; the c->0 intercept gives the base
 MIN_PROBE_CTX = 512  # supervised calibration probe — deep in the safe zone
 DEFAULT_REPEATS = 3  # N-repeat median per rung, to smooth prefill-transient sampling jitter
+
+# Speed presets trade fit granularity for fewer cold model loads (loads = rungs x
+# repeats; each load is the dominant cost). They only change WHICH contexts are probed
+# and how many times — never the pre-flight safety gate, which still measures each rung
+# and refuses to launch any rung predicted to breach the threshold.
+SPEED_PRESETS = {
+    # quick's speedup comes from repeats=1, not fewer rungs: the pre-flight gate already
+    # prunes high rungs, and a mid-dense ramp keeps the fit spanning the super-linear
+    # memory bend. Cutting rungs instead would bias the ceiling optimistically (unsafe).
+    "quick": {"ramp": [2048, 8192, 16384, 32768, 65536, 131072], "repeats": 1},
+    "standard": {"ramp": DEFAULT_RAMP, "repeats": DEFAULT_REPEATS},
+    "full": {"ramp": [2048, 4096, 8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072],
+             "repeats": DEFAULT_REPEATS},
+}
+DEFAULT_SPEED = "standard"
+
+
+def resolve_speed(speed: str, repeats: int | None = None) -> tuple[list[int], int]:
+    """Resolve a speed preset to (ramp, repeats).
+
+    The preset sets the repeats default; an explicit ``repeats`` overrides it while the
+    ramp still comes from the preset. Raises ValueError on an unknown preset name.
+    """
+    try:
+        preset = SPEED_PRESETS[speed]
+    except KeyError:
+        raise ValueError(f"unknown speed preset: {speed!r} "
+                         f"(choose from {', '.join(SPEED_PRESETS)})")
+    return list(preset["ramp"]), preset["repeats"] if repeats is None else repeats
 # rough base-footprint estimate (GB): weights resident + fixed overhead, on top of the
 # live system baseline. Calibrated loosely on Gemma/Qwen; refined as more models run.
 # profiles.py is the source of truth for these cold-start defaults; aliased here for
