@@ -60,7 +60,7 @@ uv run wmx-suite system                   # machine wall, swap, baseline
 uv run wmx-suite health                   # live pressure + per-model go/no-go (read-only)
 uv run wmx-suite scan                     # register mlx-community models from HF cache
 uv run wmx-suite show <hf_id>             # architecture + memory class
-uv run wmx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this)
+uv run wmx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this; --speed quick|standard|full)
 uv run wmx-suite calibrate                # seed this machine's cold-start overhead profile
 uv run wmx-suite list                     # ceilings from the DB
 uv run wmx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
@@ -130,6 +130,18 @@ wmx_suite/
 Data flow: `scan/describe` → register model → `characterize` ramps context safely,
 storing each measurement and a fitted line (`os_wired = intercept + slope·context`) →
 solve for safe ceiling and hard wall.
+
+`characterize --speed {quick,standard,full}` (default `standard`) trades fit granularity
+for fewer cold model loads — the dominant cost is loads (= rungs × repeats), not algorithm
+complexity. Presets live in `probe.SPEED_PRESETS`; `resolve_speed()` maps a preset to
+`(ramp, repeats)` and an explicit `--repeats` overrides the preset's repeats (ramp always
+comes from the preset). `quick` gets its ~3× speedup from `repeats=1`, **not** from fewer
+rungs: real memory grows super-linearly (KV storage is linear, but attention-prefill
+scratch + OS wired overhead bend the curve up), so a sparse low-context ramp would
+extrapolate the ceiling *optimistically* — the unsafe direction. `quick` therefore keeps a
+mid-dense ramp that spans the bend; the pre-flight gate prunes high rungs anyway. The
+preset never touches the safety gate: every rung is still measured and the ramp still stops
+before launching any rung predicted to breach the threshold.
 
 ## Architecture (launch path)
 

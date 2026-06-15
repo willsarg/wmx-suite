@@ -74,7 +74,7 @@ use them only when you understand the hard-lock risk.
 | `uv run wmx-suite health` | Live snapshot: current pressure + per-model ✓/✗ go-no-go |
 | `uv run wmx-suite scan` | Register `mlx-community` models from the HF cache |
 | `uv run wmx-suite show <hf_id>` | Architecture + memory class for one model |
-| `uv run wmx-suite characterize <hf_id>` | Safe probe → fitted context ceiling |
+| `uv run wmx-suite characterize <hf_id>` | Safe probe → fitted context ceiling (`--speed quick` is ~3× faster, still conservative; `standard` is the default, `full` is finer) |
 | `uv run wmx-suite calibrate` | Measure this machine's cold-start memory overhead so pre-flight estimates are accurate on your Apple Silicon SKU (run once per machine; `characterize` still adapts per model) |
 | `uv run wmx-suite list` | Ceilings for everything characterized; warns about stale fits |
 | `uv run wmx-suite run --model <hf_id> …` | Safely launch `mlx_lm.generate` |
