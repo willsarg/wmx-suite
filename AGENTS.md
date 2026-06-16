@@ -15,6 +15,11 @@ host. The **primary testbed is Will's M4 Pro MacBook (24 GB)**: it generates the
 data and the example numbers below, but the suite is meant to be trustworthy across
 M-series SKUs.
 
+**Design docs live outside this repo.** Design specs and implementation plans are kept in
+the maintainer's separate design notes, not under `docs/`. The CLI visual source of truth
+(`docs/mockups/cli-output-mockup.html`) stays in the repo because code and tests reference
+it.
+
 ## RULE #1 — NEVER CRASH THE LAPTOP
 
 This overrides convenience, speed, and completeness. Concretely:
