@@ -41,7 +41,7 @@ def render_abort(console, data: dict) -> None:
         # the fix is a different model, not more memory.
         tries = [
             ("wmx-suite calibrate --model <other>", "calibrate with a model that loads"),
-            ("wmx-suite search <query>", "find a working build to download"),
+            ("huggingface.co/mlx-community", "find a working build to download"),
         ]
     elif kind == "memory":
         tries = [

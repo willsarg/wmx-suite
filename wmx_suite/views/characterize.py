@@ -80,7 +80,7 @@ def render_refusal(console, data: dict) -> None:
                f"exceeds the crash wall ({data['wall_gb']:.2f} GB) — it can't load "
                f"without risking a hard lock, so we never probe it."]
         tries = [
-            ("wmx-suite search <smaller>", "find a smaller or more-quantized build"),
+            ("huggingface.co/mlx-community", "browse for a smaller / more-quantized build"),
             ("wmx-suite health", "see what does fit right now"),
         ]
     else:  # borderline
@@ -90,7 +90,7 @@ def render_refusal(console, data: dict) -> None:
         tries = [
             (f"wmx-suite characterize {model} --min-probe",
              "measure the true base with one supervised safe probe"),
-            ("wmx-suite search <smaller>", "or pick a smaller build"),
+            ("huggingface.co/mlx-community", "or pick a smaller build"),
         ]
     console.emit(console.guidance(
         f"Can't characterize {model} — it won't fit safely on this Mac.", why, tries))
@@ -105,8 +105,8 @@ def render_failure(console, data: dict) -> None:
     console.emit(console.guidance(
         f"Couldn't measure {model}.",
         [data.get("note") or "The model failed to load during probing."],
-        [("wmx-suite search <query>", "find a different build that loads"),
-         ("wmx-suite show " + model, "inspect its architecture")],
+        [("huggingface.co/mlx-community", "find a different build that loads"),
+         ("wmx-suite list", "see what already fits this Mac")],
     ))
 
 

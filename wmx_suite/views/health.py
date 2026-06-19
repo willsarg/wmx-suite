@@ -161,7 +161,6 @@ def render(console, data: dict) -> None:
 
     # ── next block ──────────────────────────────────────────────────────────
     c.emit(c.next_block([
-        ("wmx-suite show <model>",              "architecture + KV-cache memory class for one model"),
         ("wmx-suite run --model <m> --dry-run", "preview the safe launch plan without running it"),
         ("wmx-suite characterize <model>",      "measure the safe ceiling of a model not listed yet"),
     ]))

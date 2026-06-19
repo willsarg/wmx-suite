@@ -2,8 +2,6 @@
 
     uv run wmx-suite system                 # show the machine's memory wall + swap
     uv run wmx-suite health                  # live snapshot: pressure + per-model go/no-go
-    uv run wmx-suite scan                    # register all mlx-community models in the cache
-    uv run wmx-suite show <hf_id>            # architecture + memory class for one model
     uv run wmx-suite characterize <hf_id>   # safe probe -> fitted context ceiling
     uv run wmx-suite list                    # characterized models + ceilings from the DB
 """

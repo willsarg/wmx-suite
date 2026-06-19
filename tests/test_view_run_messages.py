@@ -220,9 +220,8 @@ class TestRenderNotFound:
         # Context gloss
         assert "already downloaded" in out or "already download" in out or "suite only sees" in out
 
-        # Three try options
+        # Two try options (download, then list)
         assert "hf download mlx-community/Llama-3-70B" in out
-        assert "wmx-suite scan" in out
         assert "wmx-suite list" in out
 
         # NO cache path in normal mode
@@ -252,14 +251,13 @@ class TestRenderNotFound:
         assert "Llama-3-70B" in out
 
     def test_try_order(self):
-        """hf download first, then scan, then list."""
+        """hf download first, then list."""
         con, buf = _console()
         render_not_found(con, NOT_FOUND_DATA)
         out = buf.getvalue()
         dl_pos = out.index("hf download")
-        scan_pos = out.index("wmx-suite scan")
         list_pos = out.index("wmx-suite list")
-        assert dl_pos < scan_pos < list_pos
+        assert dl_pos < list_pos
 
 
 # ===========================================================================
@@ -268,7 +266,7 @@ class TestRenderNotFound:
 
 class TestRenderNoModels:
     def test_normal_guidance(self):
-        """No-models state points at scan + characterize."""
+        """No-models state points at downloading + characterize."""
         con, buf = _console()
         render_no_models(con, NO_MODELS_DATA)
         out = buf.getvalue()
@@ -276,8 +274,8 @@ class TestRenderNoModels:
         # Some kind of "no models" headline
         assert "no" in out.lower() or "empty" in out.lower() or "haven't" in out.lower()
 
-        # Must point at scan and characterize
-        assert "scan" in out
+        # Must point at how to get a model and how to measure it
+        assert "hf download" in out
         assert "characterize" in out
 
     def test_color_smoke(self):

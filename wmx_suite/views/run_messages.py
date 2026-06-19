@@ -161,7 +161,7 @@ def render_not_found(console, data: dict) -> None:
     Normal output:
         - Bad headline: "<full model id> isn't in your Hugging Face cache."
         - Context: the suite only sees models you've already downloaded.
-        - try: hf download <model>, wmx-suite scan, wmx-suite list.
+        - try: hf download <model>, wmx-suite list.
 
     Verbose appends the searched cache path (and HF_HOME note if unset).
     """
@@ -176,7 +176,6 @@ def render_not_found(console, data: dict) -> None:
     dl_cmd = f"hf download {model}"
     tries = [
         (dl_cmd,          "get it first"),
-        ("wmx-suite scan", "then re-scan your cache"),
         ("wmx-suite list", "see what's already measured"),
     ]
 
@@ -200,7 +199,7 @@ def render_no_models(console, data: dict) -> None:  # noqa: ARG001
 
     data: empty dict (no keys required).
 
-    Points the user at ``scan`` (discover models) and ``characterize``
+    Points the user at downloading a model and ``characterize``
     (measure safe context ceiling).
     """
     headline = "✗  No characterized models yet."
@@ -210,7 +209,7 @@ def render_no_models(console, data: dict) -> None:  # noqa: ARG001
     ]
 
     tries = [
-        ("wmx-suite scan",               "discover MLX models in your Hugging Face cache"),
+        ("hf download <model>",            "download an MLX model into your HF cache"),
         ("wmx-suite characterize <model>", "measure a model's safe context ceiling"),
     ]
 

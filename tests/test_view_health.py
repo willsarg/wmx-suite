@@ -92,7 +92,6 @@ GOLDEN_NORMAL = (
     "  safe context largest prompt+reply we can guarantee won't cross the wall\n"
     "\n"
     "next\n"
-    "  wmx-suite show <model>                architecture + KV-cache memory class for one model\n"
     "  wmx-suite run --model <m> --dry-run   preview the safe launch plan without running it\n"
     "  wmx-suite characterize <model>        measure the safe ceiling of a model not listed yet\n"
 )
@@ -123,7 +122,6 @@ GOLDEN_VERBOSE = (
     "  safe context largest prompt+reply we can guarantee won't cross the wall\n"
     "\n"
     "next\n"
-    "  wmx-suite show <model>                architecture + KV-cache memory class for one model\n"
     "  wmx-suite run --model <m> --dry-run   preview the safe launch plan without running it\n"
     "  wmx-suite characterize <model>        measure the safe ceiling of a model not listed yet\n"
 )
