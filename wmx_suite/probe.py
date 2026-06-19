@@ -104,11 +104,14 @@ def _solve_ctx(model_base: float, slope_per_k: float, ref_baseline: float,
     return int(max(0.0, headroom / slope_per_k) * 1000)
 
 
-def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, con: sqlite3.Connection) -> float:
-    """Pre-flight guess of ABSOLUTE base (context->0) OS-wired footprint, before any probe."""
-    factor, overhead, _ = profiles.cold_start_constants(con)
+def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, overhead_gb: float) -> float:
+    """Pre-flight guess of ABSOLUTE base (context->0) OS-wired footprint, before any probe.
+
+    The caller supplies the cold-start overhead (a prior calibration, or the default) — pure
+    arithmetic, no db. The resident factor is held fixed (profiles.DEFAULT_RESIDENT_FACTOR).
+    """
     os_baseline = max(limits.wired_now_gb, 2.5)
-    return os_baseline + info.weights_gb * factor + overhead
+    return os_baseline + info.weights_gb * profiles.DEFAULT_RESIDENT_FACTOR + overhead_gb
 
 
 def _run_worker(py: str, hf_id: str, ctx: int, kv_bits) -> dict:
@@ -210,7 +213,8 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
         if con_out is not None:
             con_out.emit(con_out.style("dim", "  " + " ".join(str(x) for x in a)))
 
-    est = estimate_base_gb(info, limits, con)
+    _factor, _overhead, _ = profiles.cold_start_constants(con)
+    est = estimate_base_gb(info, limits, _overhead)
     if con_out is not None:
         _view.render_header(con_out, {
             "model": hf_id, "cache_type": info.cache_type,
@@ -377,7 +381,7 @@ def _pick_calibration_model() -> str:
     return candidates[0]
 
 
-def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int,
+def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int, prior_overhead_gb: float,
                    worker_python: str | None, verbose: bool, con_out) -> dict:
     """Calibrate using ONE model. Returns the result dict.
 
@@ -408,9 +412,8 @@ def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int,
         raise SystemExit(test_msg)
 
     import mlx.core as mx
-    con = db.connect()
 
-    est = estimate_base_gb(info, limits, con)
+    est = estimate_base_gb(info, limits, prior_overhead_gb)
     if est >= threshold:
         _abort(
             f"[calibrate] estimated base {est:.2f}GB >= threshold {threshold:.2f}GB — "
@@ -420,7 +423,7 @@ def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int,
             f"({threshold:.2f} GB) — the machine is too loaded, or this model is too "
             f"big, to calibrate safely.", kind="memory")
 
-    factor, overhead, _ = profiles.cold_start_constants(con)
+    factor, overhead = profiles.DEFAULT_RESIDENT_FACTOR, prior_overhead_gb
     model_base = info.weights_gb * factor + overhead
     slope = info.estimated_slope_gb_per_k()
 
@@ -464,21 +467,23 @@ def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int,
     measured_overhead = round(intercept - profiles.DEFAULT_RESIDENT_FACTOR * info.weights_gb, 3)
     fixed_overhead = max(profiles.DEFAULT_FIXED_OVERHEAD_GB, measured_overhead)
 
-    key = profiles.machine_key()
-    db.upsert_profile(con, key, resident_factor=profiles.DEFAULT_RESIDENT_FACTOR,
-                      fixed_overhead_gb=fixed_overhead, model_id=hf_id,
-                      n_points=len(xs_k), mlx_version=mx.__version__)
+    # Pure measurement — return the result; the CALLER persists (wmx cmd_calibrate to its
+    # db, ARA to its own store). probe no longer writes the profile.
     return {
-        "hf_id": hf_id, "machine_key": key, "intercept_gb": round(intercept, 3),
+        "hf_id": hf_id, "machine_key": profiles.machine_key(), "intercept_gb": round(intercept, 3),
         "measured_overhead_gb": measured_overhead, "fixed_overhead_gb": fixed_overhead,
         "default_overhead_gb": profiles.DEFAULT_FIXED_OVERHEAD_GB, "n_points": len(xs_k),
+        "mlx_version": mx.__version__,
     }
 
 
 def calibrate(model: str | None = None, *, margin_gb: float | None = None,
               repeats: int = DEFAULT_REPEATS, worker_python: str | None = None,
-              verbose: bool = True, console=None) -> dict:
-    """Measure this machine's cold-start FIXED_OVERHEAD_GB and store a per-machine profile.
+              verbose: bool = True, console=None, prior_overhead_gb: float | None = None) -> dict:
+    """Measure this machine's cold-start FIXED_OVERHEAD_GB and return it (the caller persists).
+
+    *prior_overhead_gb* seeds the pre-flight base estimate (a previous calibration, or the
+    default when None) — probe reads no database.
 
     With an explicit ``model`` we calibrate that one (and surface a clean error if
     it won't load). With no model we auto-pick the smallest cached causal model
@@ -486,6 +491,8 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
     checkpoint in the cache doesn't sink ``wmx-suite calibrate``.
     """
     margin_gb = config.margin_gb(margin_gb)
+    if prior_overhead_gb is None:
+        prior_overhead_gb = profiles.DEFAULT_FIXED_OVERHEAD_GB
     if console is None and verbose:
         from .ui import Console
         console = Console.from_args()
@@ -507,6 +514,7 @@ def calibrate(model: str | None = None, *, margin_gb: float | None = None,
     for hf_id in candidates:
         try:
             return _calibrate_one(hf_id, margin_gb=margin_gb, repeats=repeats,
+                                  prior_overhead_gb=prior_overhead_gb,
                                   worker_python=worker_python, verbose=verbose,
                                   con_out=con_out)
         except _CalibrationLoadFailed as exc:

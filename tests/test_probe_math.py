@@ -180,33 +180,25 @@ def test_solve_ctx_uses_documented_equation(
     assert probe._solve_ctx(model_base, slope, baseline, target) == expected
 
 
-def test_estimate_base_uses_live_baseline_above_floor(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
-    con = db.connect()
+def test_estimate_base_uses_live_baseline_above_floor():
     expected = 4.0 + 8.0 * probe.RESIDENT_FACTOR + probe.FIXED_OVERHEAD_GB
-    assert probe.estimate_base_gb(_model_info(), _limits(4.0), con) == pytest.approx(expected)
+    assert probe.estimate_base_gb(_model_info(), _limits(4.0),
+                                  probe.FIXED_OVERHEAD_GB) == pytest.approx(expected)
 
 
-def test_estimate_base_uses_two_point_five_gb_baseline_floor(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
-    con = db.connect()
+def test_estimate_base_uses_two_point_five_gb_baseline_floor():
     expected = 2.5 + 8.0 * probe.RESIDENT_FACTOR + probe.FIXED_OVERHEAD_GB
-    assert probe.estimate_base_gb(_model_info(), _limits(1.0), con) == pytest.approx(expected)
+    assert probe.estimate_base_gb(_model_info(), _limits(1.0),
+                                  probe.FIXED_OVERHEAD_GB) == pytest.approx(expected)
 
 
-def test_estimate_base_gb_uses_profile_overhead(monkeypatch, tmp_path):
-    from wmx_suite import profiles
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "suite.db")
-    key = ("Apple M4 Pro", 1, 15)
-    monkeypatch.setattr(profiles, "machine_key", lambda: key)
-    con = db.connect()
+def test_estimate_base_gb_respects_supplied_overhead():
+    # estimate now takes the overhead directly (no db read) — a higher prior shifts the base.
     info = _model_info(weights_gb=4.0)
     limits = _limits(wired_now_gb=3.0)
-    base_default = probe.estimate_base_gb(info, limits, con)   # overhead 1.0
-    db.upsert_profile(con, key, resident_factor=1.05, fixed_overhead_gb=2.5,
-                      model_id="m", n_points=2, mlx_version="9.9")
-    base_profile = probe.estimate_base_gb(info, limits, con)
-    assert round(base_profile - base_default, 3) == 1.5   # overhead 2.5 - 1.0
+    base_default = probe.estimate_base_gb(info, limits, 1.0)
+    base_higher = probe.estimate_base_gb(info, limits, 2.5)
+    assert round(base_higher - base_default, 3) == 1.5   # overhead 2.5 − 1.0
 
 
 def test_pick_calibration_model_smallest_causal(monkeypatch):
@@ -252,8 +244,8 @@ def test_calibrate_solves_and_floors_overhead(monkeypatch, tmp_path):
     assert abs(result["intercept_gb"] - 2.0) < 0.05
     assert abs(result["measured_overhead_gb"] - 1.475) < 0.05   # 2.0 - 1.05*0.5
     assert result["fixed_overhead_gb"] >= profiles.DEFAULT_FIXED_OVERHEAD_GB
-    stored = db.get_profile(db.connect(), key)
-    assert stored["fixed_overhead_gb"] == result["fixed_overhead_gb"]
+    assert result["mlx_version"]                 # carries the engine version for the caller
+    # probe.calibrate no longer persists — the caller (cmd_calibrate) stores the profile.
 
 
 def test_calibrate_floor_applies_when_residual_low(monkeypatch, tmp_path):

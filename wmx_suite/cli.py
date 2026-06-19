@@ -228,7 +228,15 @@ def cmd_calibrate(args):
     """Measure this machine's cold-start overhead and store a per-machine profile."""
     margin = _configured_margin(args.margin)
     model = models.resolve_hf_id(args.model) if args.model else args.model
-    result = probe.calibrate(model, margin_gb=margin, console=args.console)
+    con = db.connect()
+    prior = profiles.cold_start_constants(con)[1]   # prior overhead seeds the pre-flight estimate
+    result = probe.calibrate(model, margin_gb=margin, console=args.console,
+                             prior_overhead_gb=prior)
+    # probe measures; the CLI persists the per-machine profile.
+    db.upsert_profile(con, result["machine_key"],
+                      resident_factor=profiles.DEFAULT_RESIDENT_FACTOR,
+                      fixed_overhead_gb=result["fixed_overhead_gb"], model_id=result["hf_id"],
+                      n_points=result["n_points"], mlx_version=result["mlx_version"])
     dev, ram, osv = result["machine_key"]
     view_calibrate.render_summary(args.console, {
         "machine": f"{dev} / {ram / 1e9:.0f}GB / macOS {osv}",
