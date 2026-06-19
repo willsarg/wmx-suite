@@ -216,12 +216,36 @@ def cmd_health(args):
             "cold-start estimates use fallback priors — run 'wmx-suite calibrate'."))
 
 
+class _DbRecorder:
+    """Persists characterize's measurement stream to the suite db (the probe→CLI seam,
+    so probe.characterize itself stays db-free)."""
+    def __init__(self, con):
+        self.con = con
+        self.run_id = None
+
+    def upsert_model(self, info_dict):
+        db.upsert_model(self.con, info_dict)
+
+    def start_run(self, hf_id, **kw):
+        self.run_id = db.start_run(self.con, hf_id, **kw)
+        return self.run_id
+
+    def add_measurement(self, ctx, **kw):
+        db.add_measurement(self.con, self.run_id, ctx, **kw)
+
+    def save_fit(self, fit_dict):
+        db.save_fit(self.con, self.run_id, fit_dict)
+
+
 def cmd_characterize(args):
     margin = _configured_margin(args.margin)
     ramp, repeats = probe.resolve_speed(args.speed, repeats=args.repeats)
+    con = db.connect()
     probe.characterize(models.resolve_hf_id(args.hf_id), margin_gb=margin,
                        allow_min_probe=args.min_probe, repeats=repeats, ramp=ramp,
-                       console=args.console)
+                       console=args.console,
+                       prior_overhead_gb=profiles.cold_start_constants(con)[1],
+                       recorder=_DbRecorder(con))
 
 
 def cmd_calibrate(args):
@@ -480,10 +504,13 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
             if ans in ("y", "yes"):
                 print(f"[run] Running characterization for {model_id}...", file=sys.stderr)
                 try:
+                    _con = db.connect()
                     probe.characterize(
                         model_id, margin_gb=margin_gb, allow_min_probe=True,
                         console=Console(color=CONSOLE.color, verbose=CONSOLE.verbose,
-                                        stream=sys.stderr))
+                                        stream=sys.stderr),
+                        prior_overhead_gb=profiles.cold_start_constants(_con)[1],
+                        recorder=_DbRecorder(_con))
                     # Re-plan with the newly saved fit
                     p = launcher.plan(model_id, margin_gb=margin_gb)
                     if p.get("error"):

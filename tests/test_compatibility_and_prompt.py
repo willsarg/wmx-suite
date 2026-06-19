@@ -45,7 +45,8 @@ def test_is_causal_classification():
                 assert info.is_causal is False
 
 
-def test_run_prompts_for_characterization(monkeypatch):
+def test_run_prompts_for_characterization(monkeypatch, tmp_path):
+    monkeypatch.setattr("wmx_suite.db.DB_PATH", tmp_path / "s.db")
     # Mock launcher.plan to return estimated first
     plans = [
         {"source": "estimated", "kv_bits": 4, "cache_type": "standard", "max_kv_size": 2048,
@@ -71,7 +72,7 @@ def test_run_prompts_for_characterization(monkeypatch):
     
     # Mock characterize to succeed
     char_called = [False]
-    def mock_char(model_id, margin_gb=None, allow_min_probe=True, console=None):
+    def mock_char(model_id, margin_gb=None, allow_min_probe=True, console=None, **kw):
         char_called[0] = True
         return {"refused": False}
     monkeypatch.setattr("wmx_suite.probe.characterize", mock_char)

@@ -339,11 +339,12 @@ def test_health_uses_environment_margin(monkeypatch, capsys):
     assert "3 GB margin" in out
 
 
-def test_characterize_uses_environment_margin(monkeypatch):
+def test_characterize_uses_environment_margin(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.db, "DB_PATH", tmp_path / "s.db")
     seen = {}
     monkeypatch.setenv(config.MARGIN_ENV, "3")
 
-    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None):
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None, **kw):
         seen.update(
             hf_id=hf_id,
             margin_gb=margin_gb,
@@ -377,10 +378,11 @@ def test_characterize_rejects_unknown_speed():
             ["characterize", "mlx-community/test", "--speed", "turbo"])
 
 
-def test_characterize_quick_passes_preset_ramp_and_repeats(monkeypatch):
+def test_characterize_quick_passes_preset_ramp_and_repeats(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.db, "DB_PATH", tmp_path / "s.db")
     seen = {}
 
-    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None):
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None, **kw):
         seen.update(repeats=repeats, ramp=ramp)
 
     monkeypatch.setattr(cli.probe, "characterize", characterize)
@@ -393,10 +395,11 @@ def test_characterize_quick_passes_preset_ramp_and_repeats(monkeypatch):
     assert seen["repeats"] == 1
 
 
-def test_characterize_explicit_repeats_overrides_speed(monkeypatch):
+def test_characterize_explicit_repeats_overrides_speed(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.db, "DB_PATH", tmp_path / "s.db")
     seen = {}
 
-    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None):
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None, **kw):
         seen.update(repeats=repeats, ramp=ramp)
 
     monkeypatch.setattr(cli.probe, "characterize", characterize)

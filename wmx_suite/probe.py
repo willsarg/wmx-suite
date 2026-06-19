@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import statistics
 import subprocess
 import sys
 from dataclasses import dataclass
 
-from . import config, db, models, profiles
+from . import config, models, profiles
 from .system import SystemLimits, read_limits, sample_settled_baseline
 
 DEFAULT_RAMP = [2048, 8192, 16384, 32768, 49152, 65536, 98304, 131072]
@@ -173,11 +172,25 @@ def _measure_rung(py: str, hf_id: str, ctx: int, kv_bits, repeats: int, *, verbo
     }
 
 
+class _NullRecorder:
+    """Default sink for characterize's stream — records nothing. Callers that want the run
+    persisted pass a db-backed recorder (so probe stays free of the database)."""
+    def upsert_model(self, info_dict): ...
+    def start_run(self, hf_id, **kw): return None
+    def add_measurement(self, ctx, **kw): ...
+    def save_fit(self, fit_dict): ...
+
+
 def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
                  allow_min_probe: bool = False, repeats: int = DEFAULT_REPEATS,
-                 worker_python: str | None = None, verbose=True, console=None) -> dict:
+                 worker_python: str | None = None, verbose=True, console=None,
+                 prior_overhead_gb: float | None = None, recorder=None) -> dict:
     ramp = ramp or DEFAULT_RAMP
     margin_gb = config.margin_gb(margin_gb)
+    if prior_overhead_gb is None:
+        prior_overhead_gb = profiles.DEFAULT_FIXED_OVERHEAD_GB
+    if recorder is None:
+        recorder = _NullRecorder()
     limits = read_limits()
     threshold = limits.safe_threshold_gb(margin_gb)
     wall = limits.wall_gb
@@ -192,10 +205,9 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     py = worker_python or sys.executable
 
     import mlx.core as mx
-    con = db.connect()
-    db.upsert_model(con, info.as_dict())
-    run_id = db.start_run(
-        con, hf_id, kv_bits=kv_bits, kv_group_size=64, quantized_kv_start=5000,
+    recorder.upsert_model(info.as_dict())
+    run_id = recorder.start_run(
+        hf_id, kv_bits=kv_bits, kv_group_size=64, quantized_kv_start=5000,
         mlx_version=mx.__version__, wall_gb=wall, safe_threshold_gb=threshold,
     )
 
@@ -213,8 +225,7 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
         if con_out is not None:
             con_out.emit(con_out.style("dim", "  " + " ".join(str(x) for x in a)))
 
-    _factor, _overhead, _ = profiles.cold_start_constants(con)
-    est = estimate_base_gb(info, limits, _overhead)
+    est = estimate_base_gb(info, limits, prior_overhead_gb)
     if con_out is not None:
         _view.render_header(con_out, {
             "model": hf_id, "cache_type": info.cache_type,
@@ -228,7 +239,7 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
 
     # ---- pre-flight gate -------------------------------------------------
     def _refuse(reason: str, kind: str):
-        db.add_measurement(con, run_id, 0, status="skipped", note=reason)
+        recorder.add_measurement(0, status="skipped", note=reason)
         if con_out is not None:
             _view.render_refusal(con_out, {
                 "model": hf_id, "kind": kind, "est_gb": est,
@@ -256,7 +267,7 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
                            "borderline")
         true_abs = m["os_wired_gb"]
         true_delta = round(true_abs - m["baseline_wired_gb"], 3)
-        db.add_measurement(con, run_id, MIN_PROBE_CTX, mlx_peak_gb=m["mlx_peak_gb"],
+        recorder.add_measurement(MIN_PROBE_CTX, mlx_peak_gb=m["mlx_peak_gb"],
                            mlx_true_gb=m["mlx_true_gb"], os_wired_gb=true_abs,
                            note=f"min-probe; delta={true_delta}")
         if con_out is not None:
@@ -304,19 +315,19 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
 
         m = _measure_rung(py, hf_id, ctx, kv_bits, repeats, verbose=verbose, log=log)
         if m is None:
-            db.add_measurement(con, run_id, ctx, status="error", note="no json output")
+            recorder.add_measurement(ctx, status="error", note="no json output")
             if con_out is not None and not xs_k:
                 _view.render_failure(con_out, {"model": hf_id, "note": "no output from probe worker"})
             break
         if m.get("status") != "ok":
-            db.add_measurement(con, run_id, ctx, status=m.get("status"), note=m.get("note"))
+            recorder.add_measurement(ctx, status=m.get("status"), note=m.get("note"))
             # If the very first rung failed to load, surface a clean failure.
             if con_out is not None and not xs_k:
                 _view.render_failure(con_out, {"model": hf_id, "note": m.get("note")})
             break  # a crash/NYI here means production can't go here either
 
         delta = m["delta"]
-        db.add_measurement(con, run_id, ctx, mlx_peak_gb=m["mlx_peak_gb"],
+        recorder.add_measurement(ctx, mlx_peak_gb=m["mlx_peak_gb"],
                            os_wired_gb=m["os_wired_gb"],
                            note=f"median of {m['repeats']}; delta={delta}; spread={m['spread_gb']}")
         xs_k.append(ctx / 1000)
@@ -330,7 +341,7 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     result = {"hf_id": hf_id, "refused": False, "run_id": run_id,
               "threshold_gb": threshold, "wall_gb": wall}
     if fit is not None:
-        db.save_fit(con, run_id, fit.__dict__)
+        recorder.save_fit(fit.__dict__)
         result["fit"] = fit.__dict__
         if con_out is not None:
             _view.render_summary(con_out, {
