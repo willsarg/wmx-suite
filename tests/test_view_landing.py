@@ -30,18 +30,14 @@ GOLDEN_NORMAL = (
     "  this machine: Apple M4 Pro · 12.04 GB free of a 15.18 GB safe budget · 3 models ready · calibrated\n"
     "\n"
     "  NEW HERE?  first time on this machine, run these in order:\n"
-    "     1) wmx-suite scan         find MLX models already in your HF cache\n"
-    "     2) wmx-suite characterize <m>  measure a model's safe context ceiling\n"
-    "     3) wmx-suite run --model <m>   launch it safely (auto KV-bits + context cap)\n"
+    "     1) wmx-suite characterize <m>  measure a model's safe context ceiling\n"
+    "     2) wmx-suite run --model <m>   launch it safely (auto KV-bits + context cap)\n"
     "\n"
     "  YOUR MACHINE\n"
     "  system                specs + memory budget (what your Mac can safely give a model)\n"
     "  health                live go/no-go: which models can run right now, and how big\n"
     "\n"
     "  MODELS\n"
-    "  search <query>        find MLX models on the Hub to download\n"
-    "  scan                  register mlx-community models found in your HF cache\n"
-    "  show <model>          architecture + KV-cache memory class for one model\n"
     "  characterize <model>  safely measure a model's max safe context\n"
     "  list                  show measured ceilings stored for this machine\n"
     "  calibrate             tune this machine's cold-start memory estimate\n"
@@ -62,18 +58,14 @@ GOLDEN_VERBOSE = (
     "  this machine: Apple M4 Pro · 12.04 GB free of a 15.18 GB safe budget · 3 models ready · calibrated\n"
     "\n"
     "  NEW HERE?  first time on this machine, run these in order:\n"
-    "     1) wmx-suite scan         find MLX models already in your HF cache\n"
-    "     2) wmx-suite characterize <m>  measure a model's safe context ceiling\n"
-    "     3) wmx-suite run --model <m>   launch it safely (auto KV-bits + context cap)\n"
+    "     1) wmx-suite characterize <m>  measure a model's safe context ceiling\n"
+    "     2) wmx-suite run --model <m>   launch it safely (auto KV-bits + context cap)\n"
     "\n"
     "  YOUR MACHINE\n"
     "  system                specs + memory budget (what your Mac can safely give a model)\n"
     "  health                live go/no-go: which models can run right now, and how big\n"
     "\n"
     "  MODELS\n"
-    "  search <query>        find MLX models on the Hub to download\n"
-    "  scan                  register mlx-community models found in your HF cache\n"
-    "  show <model>          architecture + KV-cache memory class for one model\n"
     "  characterize <model>  safely measure a model's max safe context\n"
     "  list                  show measured ceilings stored for this machine\n"
     "  calibrate             tune this machine's cold-start memory estimate\n"
@@ -130,7 +122,7 @@ def test_landing_normal_benchmarks_oneliner():
 def test_landing_normal_has_newhere_section():
     out = _run(verbose=False)
     assert "NEW HERE?" in out
-    assert "1) wmx-suite scan" in out
+    assert "1) wmx-suite characterize" in out
 
 
 def test_landing_verbose_no_verbose_hint_in_footer():

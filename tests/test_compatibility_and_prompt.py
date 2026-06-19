@@ -2,8 +2,8 @@ import pytest
 import sys
 from unittest.mock import MagicMock, patch
 
-from wmx_suite import db, models
-from wmx_suite.cli import cmd_scan, cmd_show, _run
+from wmx_suite import models
+from wmx_suite.cli import _run
 from wmx_suite.models import ModelInfo
 
 
@@ -43,40 +43,6 @@ def test_is_causal_classification():
                 info = models.describe("test/non-causal")
                 assert info is not None
                 assert info.is_causal is False
-
-
-def test_scan_filters_non_causal(monkeypatch):
-    # Mock scan_cache to return two models
-    monkeypatch.setattr(models, "scan_cache", lambda: ["test/causal", "test/non-causal"])
-    
-    # Mock describe to return one causal and one non-causal
-    causal_info = MagicMock(is_causal=True, can_quantize_kv=True, weights_gb=2.0)
-    causal_info.as_dict.return_value = {}
-    non_causal_info = MagicMock(is_causal=False)
-    
-    def mock_describe(hf_id):
-        if hf_id == "test/causal":
-            return causal_info
-        return non_causal_info
-        
-    monkeypatch.setattr(models, "describe", mock_describe)
-    
-    # Mock database upsert
-    upserted = []
-    monkeypatch.setattr(db, "connect", lambda: MagicMock())
-    monkeypatch.setattr(db, "upsert_model", lambda con, info: upserted.append(info))
-
-    # Capture rendered output via a no-color Console writing to a buffer.
-    import io
-    from types import SimpleNamespace
-    from wmx_suite.ui import Console
-    buf = io.StringIO()
-    cmd_scan(SimpleNamespace(console=Console(color=False, verbose=False, stream=buf)))
-
-    # Should only upsert the causal model
-    assert len(upserted) == 1
-    # Check that registered count is 1
-    assert "registered 1 models" in buf.getvalue()
 
 
 def test_run_prompts_for_characterization(monkeypatch):

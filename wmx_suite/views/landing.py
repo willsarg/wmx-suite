@@ -73,17 +73,12 @@ def render(console, data: dict) -> None:
     )
     c.emit(
         "     "
-        + c.style("accent", "1) wmx-suite scan")
-        + c.style("gloss", "         find MLX models already in your HF cache")
-    )
-    c.emit(
-        "     "
-        + c.style("accent", "2) wmx-suite characterize <m>")
+        + c.style("accent", "1) wmx-suite characterize <m>")
         + c.style("gloss", "  measure a model's safe context ceiling")
     )
     c.emit(
         "     "
-        + c.style("accent", "3) wmx-suite run --model <m>")
+        + c.style("accent", "2) wmx-suite run --model <m>")
         + c.style("gloss", "   launch it safely (auto KV-bits + context cap)")
     )
     c.emit()
@@ -96,9 +91,6 @@ def render(console, data: dict) -> None:
 
     # ── MODELS ──────────────────────────────────────────────────────────────
     c.emit(c.section("  MODELS"))
-    c.emit(_cmd(c, "search <query>",       "find MLX models on the Hub to download"))
-    c.emit(_cmd(c, "scan",                 "register mlx-community models found in your HF cache"))
-    c.emit(_cmd(c, "show <model>",         "architecture + KV-cache memory class for one model"))
     c.emit(_cmd(c, "characterize <model>", "safely measure a model's max safe context"))
     c.emit(_cmd(c, "list",                 "show measured ceilings stored for this machine"))
     c.emit(_cmd(c, "calibrate",            "tune this machine's cold-start memory estimate"))

@@ -41,7 +41,7 @@ def test_global_flags_default_off(monkeypatch):
     assert isinstance(args.console, Console)
 
 
-@pytest.mark.parametrize("cmd", ["system", "scan", "list", "health"])
+@pytest.mark.parametrize("cmd", ["system", "list", "health"])
 def test_global_flags_on_multiple_subcommands(monkeypatch, cmd):
     captured = {}
     # Spy on whichever command we route to so no real work runs.

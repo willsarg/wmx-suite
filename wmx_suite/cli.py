@@ -31,11 +31,8 @@ from .ui import Console
 from .views import health as view_health
 from .views import landing as view_landing
 from .views import list as view_list
-from .views import scan as view_scan
-from .views import show as view_show
 from .views import system as view_system
 from .views import run_messages as view_run
-from .views import search as view_search
 from .views import calibrate as view_calibrate
 
 # Default Console for the `run` fast path; main() replaces it per-invocation.
@@ -217,120 +214,6 @@ def cmd_health(args):
             "warn",
             f"No calibration profile for {dev} / {ram / 1e9:.0f}GB / macOS {osv}; "
             "cold-start estimates use fallback priors — run 'wmx-suite calibrate'."))
-
-
-def cmd_scan(args):
-    con = db.connect()
-    found = models.scan_cache()
-    model_rows = []
-    for hf_id in found:
-        info = models.describe(hf_id)
-        if info is None or not info.is_causal:
-            continue
-        db.upsert_model(con, info.as_dict())
-        model_rows.append({
-            "hf_id": hf_id,
-            "weights_gb": info.weights_gb,
-            "weights_gb_exact": info.weights_gb,
-            "kv_label": ("quantizable KV" if info.can_quantize_kv
-                         else "fp16-only KV (sliding-window cache)"),
-            "cache_type": info.as_dict().get("cache_type", ""),
-        })
-    view_scan.render(args.console, {"models": model_rows, "registered": len(model_rows)})
-
-
-_QUANT_TAGS = ("2-bit", "3-bit", "4-bit", "5-bit", "6-bit", "8-bit",
-               "bf16", "fp16", "fp8")
-
-
-def _quant_from_tags(tags) -> str:
-    for t in tags:
-        if t in _QUANT_TAGS:
-            return t
-    return "—"
-
-
-def cmd_search(args):
-    """Search the Hub for MLX models via the `hf` CLI (no Python hub dep)."""
-    author = None if getattr(args, "all_authors", False) else "mlx-community"
-    cmd = ["hf", "models", "list", "--search", args.query,
-           "--sort", "downloads", "--limit", str(args.limit), "--json"]
-    if author:
-        cmd += ["--author", author]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        args.console.emit(args.console.guidance(
-            "The `hf` CLI isn't installed.",
-            ["wmx-suite search shells out to the Hugging Face CLI to query the Hub."],
-            [("uv pip install -U huggingface_hub", "install it, then retry"),
-             ("open https://huggingface.co/models", "browse the Hub in a browser")]))
-        raise SystemExit(1)
-    except subprocess.TimeoutExpired:
-        args.console.emit(args.console.style("warn", "Hub search timed out (30s)."))
-        raise SystemExit(1)
-    if proc.returncode != 0:
-        args.console.emit(args.console.guidance(
-            "Hub search failed.",
-            [proc.stderr.strip() or "`hf models list` returned an error."],
-            [("hf auth login", "if this is an auth or rate-limit issue"),
-             ("open https://huggingface.co/models", "browse the Hub instead")]))
-        raise SystemExit(1)
-    try:
-        raw = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        raw = []
-    results = []
-    for m in raw:
-        tags = m.get("tags") or []
-        results.append({
-            "id": m["id"],
-            "downloads": m.get("downloads") or 0,
-            "likes": m.get("likes") or 0,
-            "quant": _quant_from_tags(tags),
-            "mlx": ("mlx" in tags) or (m.get("library_name") == "mlx"),
-        })
-    view_search.render(args.console, {
-        "query": args.query, "author": author, "limit": args.limit,
-        "count": len(results), "results": results,
-    })
-
-
-def cmd_show(args):
-    hf_id = models.resolve_hf_id(args.hf_id)
-    info = models.describe(hf_id)
-    if info is None:
-        view_run.render_not_found(args.console, {
-            "model": hf_id,
-            "cache_path": os.environ.get("HF_HOME", "~/.cache/huggingface/hub"),
-            "hf_home_set": "HF_HOME" in os.environ,
-        })
-        raise SystemExit(1)
-    if not info.is_causal:
-        print(f"WARNING: Model {hf_id} is in HF cache but is not a supported causal language model.")
-    d = info.as_dict()
-    bpt = info.fp16_kv_bytes_per_token()
-    cache_type = d["cache_type"]
-    data = {
-        "hf_id": hf_id,
-        "weights_gb": info.weights_gb,
-        "n_layers": d["n_layers"],
-        "growing_layers": d["growing_layers"],
-        "max_context": d["max_context"],
-        "kv_label": (f"sliding-window ({cache_type})" if not info.can_quantize_kv
-                     else f"standard ({cache_type})"),
-        "can_quantize_kv": info.can_quantize_kv,
-        "growth_gb_per_1k": bpt * 1000 / 1e9,
-        "cache_type": cache_type,
-        "kv_heads": d["kv_heads"],
-        "head_dim": d["head_dim"],
-        "hidden_size": d["hidden_size"],
-        "layer_types": str(d["layer_types"]),
-        "max_kv_size_enforced": d["max_kv_size_enforced"],
-        "is_causal": d["is_causal"],
-        "fp16_kv_bytes_per_token": int(bpt),
-    }
-    view_show.render(args.console, data)
 
 
 def cmd_characterize(args):
@@ -727,14 +610,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--margin", default=None,
                    help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
     p.set_defaults(func=cmd_health)
-    sub.add_parser("scan").set_defaults(func=cmd_scan)
-    p = sub.add_parser("search", help="search the Hub for MLX models to download")
-    p.add_argument("query", help="search text, e.g. 'gemma-4'")
-    p.add_argument("--limit", type=int, default=15, help="max results (default 15)")
-    p.add_argument("--all-authors", action="store_true",
-                   help="don't restrict to mlx-community")
-    p.set_defaults(func=cmd_search)
-    p = sub.add_parser("show"); p.add_argument("hf_id"); p.set_defaults(func=cmd_show)
     p = sub.add_parser("characterize"); p.add_argument("hf_id")
     p.add_argument("--margin", default=None,
                    help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
