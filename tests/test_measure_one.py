@@ -80,14 +80,20 @@ def test_run_refuses_when_gate_vetoes_without_loading(monkeypatch):
     assert out["refused"] is True and out["context"] == 2000
 
 
-def test_run_returns_canonical_mem_on_safe_measurement(monkeypatch):
+def test_run_returns_median_delta_on_safe_measurement(monkeypatch):
     monkeypatch.setattr(measure_one.models, "describe", lambda hf: _info())
     monkeypatch.setattr(measure_one.system, "read_limits", lambda: _limits())
     monkeypatch.setattr(measure_one.system, "sample_settled_baseline", lambda: 8.0)
+    # three fresh runs with jittery absolute wired but a stable delta over baseline
+    runs = iter([
+        {"status": "ok", "os_wired_gb": 9.3, "baseline_wired_gb": 4.0},   # delta 5.3
+        {"status": "ok", "os_wired_gb": 10.1, "baseline_wired_gb": 4.9},  # delta 5.2
+        {"status": "ok", "os_wired_gb": 8.9, "baseline_wired_gb": 3.6},   # delta 5.3
+    ])
     monkeypatch.setattr(measure_one, "_spawn_worker",
-                        lambda hf, ctx, kv_bits, abort_wired_gb: {"status": "ok", "os_wired_gb": 9.3})
-    out = measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0)
-    assert out == {"context": 4000, "mem_gb": 9.3}
+                        lambda hf, ctx, kv_bits, abort_wired_gb: next(runs))
+    out = measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0, repeats=3)
+    assert out == {"context": 4000, "mem_gb": 5.3}     # median delta, ambient drift removed
 
 
 def test_run_refuses_when_worker_load_errors(monkeypatch):
@@ -109,10 +115,10 @@ def test_run_passes_safe_budget_as_watchdog_limit(monkeypatch):
 
     def fake_spawn(hf, ctx, kv_bits, abort_wired_gb):
         captured["abort"] = abort_wired_gb
-        return {"status": "ok", "os_wired_gb": 9.0}
+        return {"status": "ok", "os_wired_gb": 9.0, "baseline_wired_gb": 4.0}
 
     monkeypatch.setattr(measure_one, "_spawn_worker", fake_spawn)
-    measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0)
+    measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0, repeats=1)
     assert captured["abort"] == 36.0
 
 
@@ -123,6 +129,7 @@ def test_preflight_returns_estimate_without_loading(monkeypatch):
     est = measure_one.preflight("small/model", margin_gb=4.0, overhead_gb=1.0)
     # base = live 8 + (0.1*1.05 + 1) = 9.105 ; budget = 36 ; slope/max passthrough
     assert est["base_gb"] == round(8.0 + 0.1 * 1.05 + 1.0, 4)
+    assert est["ref_baseline_gb"] == 8.0     # live OS baseline, added at solve time
     assert est["slope_gb_per_k"] == 0.02
     assert est["budget_gb"] == 36.0
     assert est["max_context"] == 8192

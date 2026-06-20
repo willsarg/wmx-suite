@@ -16,9 +16,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 
 from . import models, probe, profiles, system
+
+# Repeat each rung in fresh processes and take the median: a single prefill peak lands
+# between sampler windows (±~1GB jitter), so one shot makes ceilings erratic.
+DEFAULT_REPEATS = 3
 
 
 def safety_gate(info, limits, ctx: int, *, margin_gb: float, overhead_gb: float,
@@ -57,7 +62,8 @@ def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float) -> dict:
     live_base = system.sample_settled_baseline()
     model_base = info.weights_gb * profiles.DEFAULT_RESIDENT_FACTOR + overhead_gb
     return {
-        "base_gb": round(live_base + model_base, 4),
+        "base_gb": round(live_base + model_base, 4),   # absolute, for ARA's a-priori gate
+        "ref_baseline_gb": round(live_base, 4),        # live OS baseline, added at solve time
         "slope_gb_per_k": info.estimated_slope_gb_per_k(),
         "budget_gb": limits.safe_threshold_gb(margin_gb),
         "max_context": info.max_context,
@@ -78,8 +84,14 @@ def _refused(ctx: int, reason: str) -> dict:
     return {"context": ctx, "refused": True, "reason": reason}
 
 
-def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float) -> dict:
-    """Gate then (if safe) measure; return the canonical result dict."""
+def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
+        repeats: int = DEFAULT_REPEATS) -> dict:
+    """Gate then (if safe) measure; return the canonical result dict.
+
+    ``mem_gb`` is the model's DELTA over its own launch baseline (``os_wired - baseline``),
+    median over *repeats* fresh runs — this removes ambient cross-process drift and per-run
+    jitter, so the fit is stable. ARA adds the live ref_baseline back at solve time.
+    """
     info = models.describe(hf_id)
     if info is None:
         return _refused(ctx, f"model not found in HF cache: {hf_id}")
@@ -95,10 +107,13 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float) -> dict:
 
     kv_bits = 4 if info.can_quantize_kv else None
     threshold = limits.safe_threshold_gb(margin_gb)
-    raw = _spawn_worker(hf_id, ctx, kv_bits, abort_wired_gb=threshold)
-    if raw.get("status") != "ok":
-        return _refused(ctx, f"probe failed: {raw.get('note', 'no output')}")
-    return {"context": ctx, "mem_gb": raw["os_wired_gb"]}
+    deltas = []
+    for _ in range(max(1, repeats)):
+        raw = _spawn_worker(hf_id, ctx, kv_bits, abort_wired_gb=threshold)
+        if raw.get("status") != "ok":
+            return _refused(ctx, f"probe failed: {raw.get('note', 'no output')}")
+        deltas.append(raw["os_wired_gb"] - raw["baseline_wired_gb"])
+    return {"context": ctx, "mem_gb": round(statistics.median(deltas), 3)}
 
 
 def main(argv=None) -> None:
@@ -109,11 +124,13 @@ def main(argv=None) -> None:
     ap.add_argument("--overhead", type=float, required=True)
     ap.add_argument("--preflight", action="store_true",
                     help="print the no-load estimate (base/slope/budget) and exit")
+    ap.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
     args = ap.parse_args(argv)
     if args.preflight:
         result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead)
     else:
-        result = run(args.hf_id, args.ctx, margin_gb=args.margin, overhead_gb=args.overhead)
+        result = run(args.hf_id, args.ctx, margin_gb=args.margin,
+                     overhead_gb=args.overhead, repeats=args.repeats)
     print(json.dumps(result), flush=True)
 
 
