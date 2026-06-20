@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import threading
 import time
+
+
+def _should_abort(wired_gb: float, limit_gb: float | None) -> bool:
+    """Watchdog trip: has live wired memory reached the hard limit? (None = off.)"""
+    return limit_gb is not None and wired_gb >= limit_gb
 
 
 def _wired_gb() -> float:
@@ -34,18 +40,29 @@ def main() -> None:
     ap.add_argument("--kv-group-size", type=int, default=64)
     ap.add_argument("--quantized-kv-start", type=int, default=5000)
     ap.add_argument("--max-tokens", type=int, default=8)
+    ap.add_argument("--abort-wired-gb", type=float, default=None,
+                    help="watchdog: kill the probe if live wired memory reaches this (GB)")
     args = ap.parse_args()
 
     import mlx.core as mx
     from mlx_lm import generate, load
 
-    # sample OS-wired memory continuously; report the high-water mark
+    # sample OS-wired memory continuously; report the high-water mark. If a watchdog limit
+    # is set and live wired reaches it (the pre-flight prediction was wrong), abort NOW —
+    # dying frees the wired memory before it can reach the crash wall (L5, last defense).
     hi = [0.0]
     stop = [False]
 
     def sampler():
         while not stop[0]:
-            hi[0] = max(hi[0], _wired_gb())
+            w = _wired_gb()
+            hi[0] = max(hi[0], w)
+            if _should_abort(w, args.abort_wired_gb):
+                print(json.dumps({
+                    "hf_id": args.hf_id, "context": args.context, "status": "aborted",
+                    "note": f"watchdog: wired {w:.2f}GB >= limit {args.abort_wired_gb:.2f}GB",
+                    "os_wired_gb": round(w, 3)}), flush=True)
+                os._exit(3)
             time.sleep(0.05)
 
     t = threading.Thread(target=sampler, daemon=True)

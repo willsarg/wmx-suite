@@ -113,10 +113,12 @@ def estimate_base_gb(info: models.ModelInfo, limits: SystemLimits, overhead_gb: 
     return os_baseline + info.weights_gb * profiles.DEFAULT_RESIDENT_FACTOR + overhead_gb
 
 
-def _run_worker(py: str, hf_id: str, ctx: int, kv_bits) -> dict:
+def _run_worker(py: str, hf_id: str, ctx: int, kv_bits, abort_wired_gb=None) -> dict:
     cmd = [py, "-m", "wmx_suite.probe_worker", hf_id, str(ctx)]
     if kv_bits is not None:
         cmd += ["--kv-bits", str(kv_bits)]
+    if abort_wired_gb is not None:
+        cmd += ["--abort-wired-gb", str(abort_wired_gb)]
     out = subprocess.run(cmd, capture_output=True, text=True)
     line = next((l for l in out.stdout.splitlines() if l.startswith("{")), None)
     if not line:
