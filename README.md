@@ -72,13 +72,10 @@ use them only when you understand the hard-lock risk.
 |---|---|
 | `uv run wmx-suite system` | Show the machine's wall, swap, baseline |
 | `uv run wmx-suite health` | Live snapshot: current pressure + per-model ✓/✗ go-no-go |
-| `uv run wmx-suite scan` | Register `mlx-community` models from the HF cache |
-| `uv run wmx-suite show <hf_id>` | Architecture + memory class for one model |
 | `uv run wmx-suite characterize <hf_id>` | Safe probe → fitted context ceiling (`--speed quick` is ~3× faster, still conservative; `standard` is the default, `full` is finer) |
 | `uv run wmx-suite calibrate` | Measure this machine's cold-start memory overhead so pre-flight estimates are accurate on your Apple Silicon SKU (run once per machine; `characterize` still adapts per model) |
 | `uv run wmx-suite list` | Ceilings for everything characterized; warns about stale fits |
 | `uv run wmx-suite run --model <hf_id> …` | Safely launch `mlx_lm.generate` |
-| `uv run wmx-suite web` | Launch the Flask web UI dashboard (default port 5001) |
 
 `characterize` refuses to launch any probe whose pre-flight base estimate already
 exceeds the safe threshold — this is how oversized models (like the 27B) are handled:
@@ -144,14 +141,9 @@ data/suite.db       # results (gitignored)
 
 **v0 scaffold.** Validated methodology: predicted Gemma's ceiling to within **0.5%** from
 safe probes. Calibration of the pre-flight base estimate refines as more models are run.
-Flask UI (`web` extra) is fully functional for browsing fits, viewing regression curves, and comparing model ceilings side-by-side. 
 
-To run the Web UI, install web dependencies and start the server:
-```bash
-uv sync --extra web
-uv run wmx-suite web
-```
-Then navigate to `http://127.0.0.1:5001` in your browser.
+wmx-suite is a headless measurement + benchmark engine: CLI and JSON only. Visualization
+(browsing fits, regression curves, side-by-side ceilings) lives in its consumer, Project ARA.
 
 
 ## 🤝 Contributing

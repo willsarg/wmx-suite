@@ -169,7 +169,6 @@ def test_render_perf_golden_plain():
     assert "next" in out
     assert "kokoro-ttfa" in out
     assert "kokoro-baseline" in out
-    assert "wmx-suite web" in out
     # No ANSI
     assert "\033" not in out
 
@@ -287,7 +286,6 @@ def test_render_ttfa_golden_plain():
     assert "next" in out
     assert "kokoro-ttfa" not in out  # this IS the ttfa benchmark; next points elsewhere
     assert "wmx-suite benchmark kokoro" in out
-    assert "wmx-suite web" in out
     # No ANSI
     assert "\033" not in out
 
@@ -368,7 +366,6 @@ def test_render_baseline_golden_plain():
     # next block
     assert "next" in out
     assert "wmx-suite benchmark kokoro" in out
-    assert "wmx-suite web" in out
     # No ANSI
     assert "\033" not in out
 

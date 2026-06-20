@@ -111,7 +111,6 @@ def render_perf(console, data: dict) -> None:
     next_items = [
         ("wmx-suite benchmark kokoro-ttfa", "measure streaming vs non-streaming latency"),
         ("wmx-suite benchmark kokoro-baseline", "measure the active synthesis memory floor"),
-        ("wmx-suite web", "explore results in the browser"),
     ]
     console.emit(console.next_block(next_items))
 
@@ -210,7 +209,6 @@ def render_ttfa(console, data: dict) -> None:
     console.emit(console.next_block([
         ("wmx-suite benchmark kokoro",          "throughput sweep across text lengths"),
         ("wmx-suite benchmark kokoro-baseline", "measure the active synthesis memory floor"),
-        ("wmx-suite web",                       "explore results in the browser"),
     ]))
 
 
@@ -281,7 +279,6 @@ def render_baseline(console, data: dict) -> None:
     console.emit(console.next_block([
         ("wmx-suite benchmark kokoro",      "throughput sweep across text lengths"),
         ("wmx-suite benchmark kokoro-ttfa", "streaming latency sweep"),
-        ("wmx-suite web",                   "explore results in the browser"),
     ]))
 
 

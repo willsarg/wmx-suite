@@ -312,30 +312,6 @@ def cmd_list(args):
                         "re-run 'wmx-suite characterize'."))
 
 
-def cmd_web(args):
-    """Launch the Flask dashboard web server."""
-    try:
-        from wmx_suite.web.app import create_app
-    except ImportError as exc:
-        raise SystemExit(
-            "Flask is not installed or web modules are missing. "
-            "Please run: pip install wills-wmx-suite[web] or uv sync --extra web"
-        ) from exc
-
-    app = create_app()
-    if app is None:
-        raise SystemExit("Failed to initialize Flask application.")
-
-    if not args.debug:
-        import logging
-        logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
-    print(f"Launching wmx-suite dashboard on http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=args.debug)
-
-
-
-
 
 RUN_HELP = """usage: wmx-suite run [--margin GB] [--force] [--dry-run] [--co-run-kokoro] -- <mlx_lm.generate args>
 
@@ -664,11 +640,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--margin", default=None,
                    help="safety cushion in GB (overrides WMX_SUITE_MARGIN_GB)")
     p.set_defaults(func=cmd_calibrate)
-    p = sub.add_parser("web", help="Launch the Flask web UI dashboard")
-    p.add_argument("--host", default="127.0.0.1", help="Host interface to bind to")
-    p.add_argument("--port", type=int, default=5001, help="Port to listen on")
-    p.add_argument("--debug", action="store_true", help="Run in Flask debug mode")
-    p.set_defaults(func=cmd_web)
     # `run` is intercepted before argparse (see below) so it can pass arbitrary flags
     # through to mlx_lm.generate; this stub only makes it show up in `--help`.
     sub.add_parser("run", help="safely launch mlx_lm.generate: picks kv-bits by cache "

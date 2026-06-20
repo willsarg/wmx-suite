@@ -164,7 +164,6 @@ def test_render_batch_next_block():
     assert "next" in out
     assert "kokoro-voice" in out
     assert "kokoro-cache" in out
-    assert "wmx-suite web" in out
 
 
 def test_render_batch_no_ansi_plain():
@@ -318,7 +317,6 @@ def test_render_voice_next_block():
     assert "next" in out
     assert "kokoro-batch" in out
     assert "kokoro-cache" in out
-    assert "wmx-suite web" in out
 
 
 def test_render_voice_no_ansi_plain():
@@ -462,7 +460,6 @@ def test_render_cache_next_block():
     assert "next" in out
     assert "kokoro-batch" in out
     assert "kokoro-voice" in out
-    assert "wmx-suite web" in out
 
 
 def test_render_cache_no_ansi_plain():

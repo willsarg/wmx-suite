@@ -64,8 +64,8 @@ These are enforced — please follow them:
 - **Packages: `uv` only.** Never use `pip install --break-system-packages`.
 - **HuggingFace CLI: `hf`**, not the deprecated `huggingface-cli`.
 - Stick to **`mlx-community`** models for measurements and examples.
-- SQLite is the datastore (`data/suite.db`, gitignored). Flask is an optional extra
-  (`web`) — only add UI code if the change calls for it.
+- SQLite is the datastore (`data/suite.db`, gitignored). wmx-suite is headless
+  (CLI/JSON only) — no UI code; visualization belongs in its consumer, Project ARA.
 - The default 2 GB safety cushion can be configured with `WMX_SUITE_MARGIN_GB`;
   command-level `--margin` values take precedence.
 - When measuring, **match production inference settings**: `--kv-bits 4` with

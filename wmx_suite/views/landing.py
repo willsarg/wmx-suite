@@ -99,7 +99,6 @@ def render(console, data: dict) -> None:
     # ── RUN ─────────────────────────────────────────────────────────────────
     c.emit(c.section("  RUN"))
     c.emit(_cmd(c, "run --model <model>", "safe launch — refuses anything that would crash the Mac"))
-    c.emit(_cmd(c, "web",                 "browser dashboard for all of the above"))
     c.emit()
 
     # ── BENCHMARKS ──────────────────────────────────────────────────────────

@@ -14,9 +14,6 @@ dependencies = [
     "soundfile>=0.14.0",
 ]
 
-[project.optional-dependencies]
-web = ["flask>=3.0"]
-
 [project.scripts]
 wmx-suite = "wmx_suite.cli:main"
 

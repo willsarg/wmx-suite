@@ -168,7 +168,6 @@ def render_batch(console, data: dict) -> None:
     console.emit(console.next_block([
         ("wmx-suite benchmark kokoro-voice", "measure voice-switch latency (warm vs cold)"),
         ("wmx-suite benchmark kokoro-cache", "measure voice-cache memory overhead"),
-        ("wmx-suite web",                   "explore results in the browser"),
     ]))
 
 
@@ -265,7 +264,6 @@ def render_voice(console, data: dict) -> None:
     console.emit(console.next_block([
         ("wmx-suite benchmark kokoro-batch", "throughput sweep across batch sizes"),
         ("wmx-suite benchmark kokoro-cache", "measure voice-cache memory overhead"),
-        ("wmx-suite web",                   "explore results in the browser"),
     ]))
 
 
@@ -347,7 +345,6 @@ def render_cache(console, data: dict) -> None:
     console.emit(console.next_block([
         ("wmx-suite benchmark kokoro-batch", "throughput sweep across batch sizes"),
         ("wmx-suite benchmark kokoro-voice", "measure voice-switch latency"),
-        ("wmx-suite web",                   "explore results in the browser"),
     ]))
 
 

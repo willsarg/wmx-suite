@@ -63,13 +63,10 @@ This overrides convenience, speed, and completeness. Concretely:
 uv sync                                   # install deps into .venv
 uv run wmx-suite system                   # machine wall, swap, baseline
 uv run wmx-suite health                   # live pressure + per-model go/no-go (read-only)
-uv run wmx-suite scan                     # register mlx-community models from HF cache
-uv run wmx-suite show <hf_id>             # architecture + memory class
 uv run wmx-suite characterize <hf_id>     # SAFE probe -> fitted ceiling (use this; --speed quick|standard|full)
 uv run wmx-suite calibrate                # seed this machine's cold-start overhead profile
 uv run wmx-suite list                     # ceilings from the DB
 uv run wmx-suite run --model <hf_id> ...  # SAFE launch of mlx_lm.generate (use this, not mlx_lm directly)
-uv run wmx-suite web                      # launch the Flask web UI dashboard (default port 5001)
 ```
 
 **`run` is the only sanctioned way to launch a model** (all logic lives in `launcher.py`).
@@ -84,7 +81,7 @@ at non-trivial context.
 - **Python packages: use `uv` only. NEVER `--break-system-packages`.**
 - **HuggingFace CLI: use `hf`, not the deprecated `huggingface-cli`.**
 - Stick to **`mlx-community`** models.
-- SQLite is the datastore (`data/suite.db`, gitignored). Flask web UI is under the `web` extra (run `uv run wmx-suite web` to launch).
+- SQLite is the datastore (`data/suite.db`, gitignored). wmx-suite is headless (CLI/JSON only) — no UI; visualization lives in its consumer, Project ARA.
 - The global safety margin defaults to 2 GB and can be set with
   `WMX_SUITE_MARGIN_GB`; an explicit `--margin` takes precedence. Reject negative,
   NaN, or infinite values.
