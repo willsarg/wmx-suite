@@ -56,8 +56,8 @@ uv run wmx-suite system          # show the machine's wall, swap, baseline
 ```
 
 The default safety cushion is 2 GB below the machine's wired-memory wall. Set
-`WMX_SUITE_MARGIN_GB` to change it globally for `system`, `health`, `characterize`, and
-`run`; an explicit `--margin` on a command takes precedence:
+`WMX_SUITE_MARGIN_GB` to change it globally for `system`, `health`, `characterize`,
+`calibrate`, and `run`; an explicit `--margin` on a command takes precedence:
 
 ```bash
 export WMX_SUITE_MARGIN_GB=3
@@ -119,21 +119,51 @@ mutable refs, and negative-lookup metadata are ignored. The suite does not
 automatically re-characterize; review the cache change and run `characterize` again
 before relying on the old ceiling.
 
+### 🎛️ Benchmarks (power users)
+
+Beyond context ceilings, the suite is a memory/perf benchmark lab for two model families.
+Each command runs under the same RULE #1 safety gating and records to `suite.db`:
+
+| Command | What it measures |
+|---|---|
+| `uv run wmx-suite benchmark-kokoro` | Kokoro TTS throughput (RTF / chars-per-sec) vs length |
+| `uv run wmx-suite benchmark-kokoro-ttfa` | streaming time-to-first-audio latency |
+| `uv run wmx-suite benchmark-kokoro-batch` | batch concurrency vs throughput |
+| `uv run wmx-suite benchmark-kokoro-voice` | voice-switching latency |
+| `uv run wmx-suite benchmark-kokoro-cache` | voice-cache memory overhead |
+| `uv run wmx-suite benchmark-kokoro-baseline` | static active-synthesis RAM floor |
+| `uv run wmx-suite benchmark-embeddings` | encoder embeddings memory surface (batch × seq_len) |
+
+Run `uv run wmx-suite benchmark-<name> --help` for options.
+
 ---
 
 ## 🗂️ Layout
 
 ```
 wmx_suite/
-  config.py         # validated runtime defaults (for example WMX_SUITE_MARGIN_GB)
-  system.py         # device wall, swap, current wired memory
-  models.py         # HF-cache config reader + memory-class classifier
-  db.py             # SQLite schema: models, probe_runs, measurements, fits, generation_log
-  probe_worker.py   # ONE isolated (model, context) measurement -> JSON
-  probe.py          # safe ramp orchestrator + linear fit + ceiling solve
-  cli.py            # command-line entry point
-data/suite.db       # results (gitignored)
+  config.py            # validated runtime defaults (e.g. WMX_SUITE_MARGIN_GB)
+  system.py            # device wall, swap, current wired memory
+  models.py            # HF-cache config reader + memory-class classifier
+  profiles.py          # per-machine cold-start constants (calibration)
+  probe.py             # safe characterize/calibrate: ramp + linear fit + ceiling solve
+  probe_worker.py      # ONE isolated (model, context) measurement -> JSON
+  launcher.py          # safe `run` planning + exec of mlx_lm.generate
+  db.py                # SQLite store (context fits, calibration, benchmarks)
+  ui.py                # shared console rendering schema
+  views/               # per-command output rendering
+  cli.py               # core command entry point
+  cli_benchmarks.py    # benchmark subcommands (Kokoro TTS + embeddings)
+  embeddings_probe.py  # embeddings memory-surface benchmark
+  kokoro_safety.py     # RULE #1 safety gating for the Kokoro workers
+  probe_worker_kokoro_*.py / probe_worker_embeddings.py   # isolated benchmark workers
+data/suite.db          # results (gitignored)
 ```
+
+The SQLite store holds three families of tables: **context-ceiling** measurement
+(`models`, `probe_runs`, `measurements`, `fits`, `generation_log`), **per-machine
+calibration** (`system_profiles`, `embedding_profiles`), and **benchmark** results
+(`kokoro_*`, `embeddings_*`).
 
 ---
 
@@ -142,8 +172,11 @@ data/suite.db       # results (gitignored)
 **v0 scaffold.** Validated methodology: predicted Gemma's ceiling to within **0.5%** from
 safe probes. Calibration of the pre-flight base estimate refines as more models are run.
 
-wmx-suite is a headless measurement + benchmark engine: CLI and JSON only. Visualization
-(browsing fits, regression curves, side-by-side ceilings) lives in its consumer, Project ARA.
+**Headless engine.** wmx-suite is CLI- and JSON-only — no UI. It is the Apple-Silicon
+measurement engine behind [Project ARA](https://github.com/willsarg/project-ara), which
+wraps it through a thin adapter: the engine *measures and returns*, the caller *persists*.
+Visualization — browsing fits, regression curves, side-by-side ceilings, and the benchmark
+dashboards — lives in ARA, not here.
 
 
 ## 🤝 Contributing
