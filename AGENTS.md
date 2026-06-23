@@ -22,6 +22,11 @@ it.
 
 ## RULE #1 — NEVER CRASH THE LAPTOP
 
+> This **is** Rule #1 (Safety) of the ARA ecosystem's three rules — **Safety · Reliability ·
+> Accuracy** (canonical: project-ara's `ARA - Product`). The other two hold here too:
+> **Reliability** (tested — see CONTRIBUTING) and **Accuracy** (measure live; never hardcode or
+> report a number you didn't measure).
+
 This overrides convenience, speed, and completeness. Concretely:
 
 - **Never launch a model run whose predicted OS-wired peak exceeds the safe threshold**
