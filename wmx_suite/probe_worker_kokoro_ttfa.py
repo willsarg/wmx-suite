@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Kokoro TTS TTFA latency benchmark worker.
 
 Benchmarks streaming Time-to-First-Audio (TTFA) latency against non-streaming 

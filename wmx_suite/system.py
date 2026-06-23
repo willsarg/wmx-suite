@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """System memory facts for this machine.
 
 The crash wall is NOT total RAM — it's the GPU/Metal recommended working-set size

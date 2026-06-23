@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """PURE render functions for ``wmx-suite run`` messages and shared error messages.
 
 All functions are side-effect-free except writing to *console*. No DB, system,

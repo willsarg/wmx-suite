@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Safe launch planning for mlx_lm.generate.
 
 Two failure modes a naive launcher hits, and how we avoid them:

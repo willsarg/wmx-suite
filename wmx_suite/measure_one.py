@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Self-vetoing single-measurement primitive — the engine-side hard veto (L4).
 
 ARA's thin path drives the ramp, but crash-prevention is checked at every layer. This is

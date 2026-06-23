@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Device limits + calibration JSON workers — ARA's out-of-process engine seam.
 
 ARA drives ``wmx_suite.device`` in the isolated engine env and reads one JSON line from

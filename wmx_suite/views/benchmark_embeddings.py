@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Pure render functions for ``wmx-suite benchmark-embeddings``.
 
 Visual language: matches the house style established in ``docs/mockups/cli-output-mockup.html``

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Kokoro TTS voice cache memory benchmark worker.
 
 Sweeps cache sizes (number of active speaker style vectors loaded in memory)

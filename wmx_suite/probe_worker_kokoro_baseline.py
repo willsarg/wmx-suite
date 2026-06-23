@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Kokoro TTS active synthesis memory baseline benchmark worker.
 
 Measures the OS-wired memory overhead (GB) of a short warm synthesis over the idle

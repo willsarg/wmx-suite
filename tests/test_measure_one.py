@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Self-vetoing single-measurement primitive (L4 of ARA's defense-in-depth).
 
 The gate runs *before* any model load: it reads the live wall, estimates the model's

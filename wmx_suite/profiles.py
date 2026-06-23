@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Per-machine cold-start constants for the pre-flight base estimate.
 
 The crash wall, the ambient baseline, and per-model fits already adapt to the host

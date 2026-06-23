@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 from types import SimpleNamespace
 
 from wmx_suite import kokoro_safety as ks

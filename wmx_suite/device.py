@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Device limits + calibration as JSON workers — for ARA's out-of-process engine driver.
 
 ARA owns no MLX knowledge: it drives these in wmx's isolated env and reads back a single JSON

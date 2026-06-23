@@ -100,6 +100,13 @@ expected. If it's a crash or near-crash, include the `system` output and any pla
 
 ## Trademarks & license
 
-By contributing, you agree your contributions are licensed under the project's
-[MIT License](./LICENSE). MLX, Apple Silicon, Metal, Mac, and macOS are trademarks of
-Apple Inc.; this is an independent project, not affiliated with Apple.
+By contributing, you agree your contributions are provided under the project's
+[Apache License 2.0](./LICENSE) — the "inbound = outbound" rule of Apache §5 (no separate CLA or
+DCO). Contribute only original code or code under an Apache-2.0-compatible permissive license
+(MIT/BSD/ISC/Apache-2.0) with its notice preserved in `NOTICE`; never GPL/LGPL/AGPL, proprietary,
+or unknown-provenance code. Start every new source file with `# SPDX-License-Identifier: Apache-2.0`
+and `# Copyright 2026 Will Sarg`. AI coding agents follow the same rules — see "License & AI agents"
+in [AGENTS.md](./AGENTS.md).
+
+MLX, Apple Silicon, Metal, Mac, and macOS are trademarks of Apple Inc.; this is an independent
+project, not affiliated with Apple.

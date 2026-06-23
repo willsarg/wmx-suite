@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Kokoro TTS batch performance benchmark worker.
 
 Runs concurrent synthesis sweeps within a single process to measure the impact of 

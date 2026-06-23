@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """SQLite store for model metadata, probe runs, raw measurements, and fitted ceilings."""
 from __future__ import annotations
 

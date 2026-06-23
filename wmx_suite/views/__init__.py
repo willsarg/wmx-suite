@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Pure render functions for each CLI command — one module per command.
 
 Each module exposes ``render(console, data)``: a PURE function — data in,

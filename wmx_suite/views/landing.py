@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Render function for ``wmx-suite`` (no args / --help landing screen).
 
 Data schema

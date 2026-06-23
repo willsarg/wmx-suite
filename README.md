@@ -4,7 +4,7 @@
 
 ### `wmx-suite` — find each model's safe context ceiling on Apple Silicon, *without crashing the machine*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](./LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge)](./LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg?style=for-the-badge&logo=python&logoColor=white)](./pyproject.toml)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-M1_to_M4-000000.svg?style=for-the-badge&logo=apple&logoColor=white)](#-why-this-exists)
 [![Built with MLX](https://img.shields.io/badge/Built_with-MLX-FF6F61.svg?style=for-the-badge)](https://github.com/ml-explore/mlx)

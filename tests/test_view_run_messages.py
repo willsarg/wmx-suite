@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Tests for wmx_suite/views/run_messages.py — PURE render functions.
 
 Hardware-free: all fixtures are static dicts. Uses Console(color=False, verbose=False)

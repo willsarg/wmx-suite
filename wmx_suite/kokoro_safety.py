@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Shared RULE #1 safety gating for the Kokoro benchmark workers.
 
 Each Kokoro worker runs its whole sweep in a single process, so it needs:

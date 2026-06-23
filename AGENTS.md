@@ -182,3 +182,20 @@ be verified. Qwen3.5 is also refused unless forced while its custom MLX cache ig
 MLX, Apple Silicon, Metal, Mac, and macOS are trademarks of Apple Inc. This project is an
 independent community tool, not affiliated with or endorsed by Apple. Name references are
 descriptive only. See the README "Trademarks" section.
+
+## License & AI agents (Apache 2.0)
+
+wmx-suite is licensed **Apache-2.0** (`LICENSE`, `NOTICE`). Abide by it in both directions.
+
+**Contributing here (inbound — Apache §5, inbound = outbound; no CLA/DCO):**
+- All contributions are under Apache-2.0.
+- Add only original code, or code under an Apache-2.0-compatible permissive license (MIT/BSD/ISC/Apache-2.0); preserve its copyright/license and record third-party components in `NOTICE`.
+- Never introduce GPL/LGPL/AGPL, proprietary, or unknown-provenance code.
+- Start every new source file with: `# SPDX-License-Identifier: Apache-2.0` and `# Copyright 2026 Will Sarg`.
+- Do not alter or remove `LICENSE`, `NOTICE`, or existing SPDX headers.
+
+**Cloning / forking / redistributing (outbound — Apache §4):**
+- Keep `LICENSE` and `NOTICE` intact in any copy or fork.
+- Retain all SPDX headers and copyright notices in files you carry.
+- State significant changes you make.
+- You may relicense *your own* additions; the Apache-2.0-covered files stay Apache-2.0.

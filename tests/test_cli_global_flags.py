@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Task 1.3: global --verbose/--no-color plumbing in cli.main().
 
 Behavior-preserving: these only assert that the flags parse on every subcommand,

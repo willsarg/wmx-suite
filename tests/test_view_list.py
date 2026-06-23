@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Tests for wmx_suite/views/list.py — pure rendering, hardware-free."""
 import io
 import pytest

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Short-name resolution, run-flag-anywhere parsing, and `search` command."""
 import io
 import json

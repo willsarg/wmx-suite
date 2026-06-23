@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Render functions for ``wmx-suite calibrate`` — progress + outcome.
 
 PURE: ``(console, data)`` in, styled output via console primitives. Data schemas

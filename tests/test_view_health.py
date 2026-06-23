@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Tests for wmx_suite/views/health.py.
 
 Hardware-free. Builds a Console with a StringIO stream, calls render, and

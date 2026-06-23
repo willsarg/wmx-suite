@@ -3,8 +3,8 @@ name = "wmx-suite"
 version = "0.1.0"
 description = "Custom memory/stress bench for local MLX inference on Apple Silicon — finds safe context ceilings without crashing the machine."
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Will Sarg" }]
 requires-python = ">=3.12"
 dependencies = [

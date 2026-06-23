@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Tests for the shared CLI rendering schema (wmx_suite/ui.py).
 
 Hardware-free and pure: no model loads, no live memory probing, no DB. Color is

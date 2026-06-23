@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """The runtime watchdog (L5) — the last line of defense.
 
 If the pre-flight prediction was wrong and live wired memory crosses a hard limit mid-probe,

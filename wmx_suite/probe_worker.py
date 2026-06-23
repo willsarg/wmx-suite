@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Single isolated memory measurement for one (model, context) pair.
 
 Run as a subprocess — one fresh process per context — so wired-memory residue from a

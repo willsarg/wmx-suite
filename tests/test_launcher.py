@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 import pytest
 
 from wmx_suite import launcher, models, profiles

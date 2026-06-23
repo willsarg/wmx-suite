@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Safe characterizer: find a model's context ceiling by extrapolation, never by crashing.
 
 Strategy:

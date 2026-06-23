@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Safe 2D (batch x seq_len) OS-wired memory-surface benchmark for encoder embeddings.
 
 Mirrors probe.py's "extrapolate, never crash" approach for a NON-causal encoder:

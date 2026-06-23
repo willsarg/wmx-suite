@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Kokoro TTS voice switching latency benchmark worker.
 
 Runs sequential sweeps within a single process to measure latency differences between:

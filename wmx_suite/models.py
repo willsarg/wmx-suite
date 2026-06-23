@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Model registry — reads HF-cache config.json and classifies each model's memory behavior.
 
 Key distinction (learned the hard way):

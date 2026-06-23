@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Shared CLI rendering schema for wmx-suite.
 
 One ``Console`` owns all presentation: color/verbose policy plus a small set of

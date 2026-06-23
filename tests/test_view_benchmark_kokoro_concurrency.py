@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Golden tests for wmx_suite/views/benchmark_kokoro_concurrency.py.
 
 Hardware-free and pure: Console(color=False, verbose=False) unless stated.

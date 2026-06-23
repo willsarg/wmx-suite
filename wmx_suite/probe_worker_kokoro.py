@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Kokoro TTS performance benchmark worker.
 
 Runs the sweeps within a single process to leverage MLX's warm kernel cache,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Pure render functions for Kokoro TTS concurrency benchmark commands.
 
 Each function is PURE: only ``console`` + ``data`` → ``console.emit`` calls.

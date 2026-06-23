@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
 """Benchmark subcommands (embeddings + Kokoro TTS), split out of cli.py.
 
 Thin orchestration handlers: parse args, stream a worker subprocess, log to the
