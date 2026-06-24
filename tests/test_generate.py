@@ -66,6 +66,23 @@ def _fake_mlx(monkeypatch, completion="hello world"):
     return captured
 
 
+def _fake_tokenizer(monkeypatch, n_tokens):
+    """Make the lazy `from transformers import AutoTokenizer` count to *n_tokens*.
+
+    Encodes the prompt to a list of length *n_tokens* without loading any weights —
+    the test asserts no model load happens before the gate.
+    """
+    import sys
+
+    class FakeTok:
+        def encode(self, text):
+            return list(range(n_tokens))
+
+    fake_auto = SimpleNamespace(from_pretrained=lambda hf_id: FakeTok())
+    monkeypatch.setitem(sys.modules, "transformers",
+                        SimpleNamespace(AutoTokenizer=fake_auto))
+
+
 # --------------------------------------------------------------------------- #
 # generate() — describe + gate + (safe) load+generate
 # --------------------------------------------------------------------------- #
@@ -73,6 +90,7 @@ def test_generate_happy_path_returns_completion(monkeypatch):
     monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
     _patch_safe_env(monkeypatch)
     monkeypatch.setattr(generate.measure_one, "safety_gate", lambda *a, **k: None)
+    _fake_tokenizer(monkeypatch, n_tokens=5)
     captured = _fake_mlx(monkeypatch, completion="the answer is 42")
 
     out = generate.generate("small/model", 4000, prompt="what is the answer?",
@@ -103,6 +121,7 @@ def test_generate_refuses_when_gate_vetoes_without_loading(monkeypatch):
     _patch_safe_env(monkeypatch)
     monkeypatch.setattr(generate.measure_one, "safety_gate",
                         lambda *a, **k: "predicted 99GB at 4000 tok >= safe budget 36GB")
+    _fake_tokenizer(monkeypatch, n_tokens=2)
     # if this loads a model, the test fails loudly
     import sys
     monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(
@@ -127,11 +146,76 @@ def test_generate_passes_gate_args_like_measure_one(monkeypatch):
         return None
 
     monkeypatch.setattr(generate.measure_one, "safety_gate", fake_gate)
+    # 3 prompt tokens + 8 max_tokens = 11, well under the 4000 ceiling, so the gate
+    # sees the effective context, not the raw ceiling.
+    _fake_tokenizer(monkeypatch, n_tokens=3)
     _fake_mlx(monkeypatch)
     generate.generate("small/model", 4000, prompt="hi",
                       margin_gb=4.0, overhead_gb=1.0, max_tokens=8)
-    assert captured == {"ctx": 4000, "margin_gb": 4.0, "overhead_gb": 1.0,
+    assert captured == {"ctx": 11, "margin_gb": 4.0, "overhead_gb": 1.0,
                         "live_base": 7.5}
+
+
+def test_generate_gates_on_effective_context_not_ceiling(monkeypatch):
+    """The gate must see prompt_tokens + max_tokens, capped at the ceiling — not ctx."""
+    seen = {}
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+        seen["ctx"] = ctx
+        return None
+
+    monkeypatch.setattr(generate.measure_one, "safety_gate", fake_gate)
+    _fake_tokenizer(monkeypatch, n_tokens=6)   # short prompt
+    _fake_mlx(monkeypatch, completion="done")
+
+    out = generate.generate("small/model", 40960, prompt="a short prompt",
+                            margin_gb=4.0, overhead_gb=1.0, max_tokens=256)
+    assert seen["ctx"] == 6 + 256            # effective context, NOT the 40960 ceiling
+    assert out == {"context": 40960, "completion": "done"}  # report the ceiling
+
+
+def test_generate_caps_effective_context_at_ceiling(monkeypatch):
+    """A prompt long enough that prompt_tokens + max_tokens > ctx caps at the ceiling."""
+    seen = {}
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+        seen["ctx"] = ctx
+        return None
+
+    monkeypatch.setattr(generate.measure_one, "safety_gate", fake_gate)
+    _fake_tokenizer(monkeypatch, n_tokens=4000)   # long prompt
+    _fake_mlx(monkeypatch, completion="done")
+
+    out = generate.generate("small/model", 4096, prompt="x" * 99,
+                            margin_gb=4.0, overhead_gb=1.0, max_tokens=512)
+    assert seen["ctx"] == 4096               # 4000 + 512 > 4096 -> capped at ceiling
+    assert out == {"context": 4096, "completion": "done"}
+
+
+def test_generate_empty_prompt_counts_zero_tokens(monkeypatch):
+    """Empty prompt -> prompt_tokens = 0 without touching the tokenizer or weights."""
+    seen = {}
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+        seen["ctx"] = ctx
+        return None
+
+    monkeypatch.setattr(generate.measure_one, "safety_gate", fake_gate)
+    # No transformers in sys.modules: an empty prompt must short-circuit before import.
+    import sys
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    _fake_mlx(monkeypatch, completion="done")
+
+    out = generate.generate("small/model", 4096, prompt="",
+                            margin_gb=4.0, overhead_gb=1.0, max_tokens=32)
+    assert seen["ctx"] == 32                  # 0 + 32
+    assert out == {"context": 4096, "completion": "done"}
 
 
 # --------------------------------------------------------------------------- #

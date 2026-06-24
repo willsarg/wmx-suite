@@ -3,9 +3,12 @@
 """Governed one-shot text generation — the engine-side generate verb for ARA's `run`.
 
 Same Safety-first (Rule #1) discipline as ``measure_one``: describe the model and run the
-existing L4 safety gate *before* loading anything. An unknown/non-causal model, or a gate
-that vetoes at the requested context, refuses with no load. Only a safe (model, ctx)
-reaches mlx_lm. The prompt is read from **stdin**, never argv. Emits one JSON line:
+existing L4 safety gate *before* loading any weights. An unknown/non-causal model, or a
+gate that vetoes, refuses with no load. The gate runs at the *effective* context the
+one-shot will actually reach — ``min(ctx, prompt_tokens + max_tokens)`` — because MLX
+grows its KV cache dynamically; the ceiling ``ctx`` stays the hard cap. Prompt tokens are
+counted with the tokenizer only (no weights). Only a safe (model, ctx) reaches mlx_lm. The
+prompt is read from **stdin**, never argv. Emits one JSON line:
 
     success: {"context": <int>, "completion": "<generated text>"}
     refused: {"context": <int>, "refused": true, "reason": "<why>"}
@@ -26,12 +29,38 @@ from . import measure_one, models, system
 _refused = measure_one._refused
 
 
+def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
+    """Tokenize *prompt* to a count WITHOUT loading model weights.
+
+    ``transformers.AutoTokenizer.from_pretrained`` reads only the tokenizer artifacts
+    from the HF cache — it never touches the weight tensors — so this preserves the
+    refuse-before-load property (Rule #1). Lazy-imported like the ``mlx_lm`` import below
+    so the module imports without transformers installed and tests can monkeypatch it.
+    """
+    if not prompt:
+        return 0
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(hf_id)
+    return len(tok.encode(prompt))
+
+
 def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
              overhead_gb: float, max_tokens: int) -> dict:
     """Gate then (if safe) load + generate; return the canonical result dict.
 
     Refuses before loading if the model is unknown/non-causal or if the shared safety
-    gate predicts the footprint at *ctx* would reach the safe budget.
+    gate predicts the footprint at the *effective* context would reach the safe budget.
+
+    ``ctx`` is the characterized ceiling — the hard cap we never gate or generate beyond.
+    But MLX grows its KV cache dynamically, so a one-shot from a short prompt only reaches
+    ``prompt_tokens + max_tokens`` of context, not the full ceiling. We therefore gate on
+    the *effective* context the run will actually reach, capped at the ceiling::
+
+        effective_ctx = min(ctx, prompt_tokens + max_tokens)
+
+    Gating the raw ceiling here would over-predict memory and refuse runs that
+    ``characterize`` already certified safe. The reported context stays the ceiling.
     """
     info = models.describe(hf_id)
     if info is None:
@@ -39,9 +68,14 @@ def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
     if not info.is_causal:
         return _refused(ctx, f"{hf_id} is not a supported causal language model")
 
+    # Count prompt tokens without loading weights (tokenizer only), then gate on the
+    # effective context this one-shot will actually reach — capped at the ceiling.
+    prompt_tokens = _count_prompt_tokens(hf_id, prompt)
+    effective_ctx = min(ctx, prompt_tokens + max_tokens)
+
     limits = system.read_limits()
     live_base = system.sample_settled_baseline()
-    reason = measure_one.safety_gate(info, limits, ctx, margin_gb=margin_gb,
+    reason = measure_one.safety_gate(info, limits, effective_ctx, margin_gb=margin_gb,
                                      overhead_gb=overhead_gb, live_base=live_base)
     if reason is not None:
         return _refused(ctx, reason)
