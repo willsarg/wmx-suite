@@ -15,6 +15,7 @@ from wmx_suite.ui import Console
 def _ns(**kw):
     """Args namespace with a no-color Console (so command output is plain text)."""
     kw.setdefault("console", Console(color=False, verbose=False))
+    kw.setdefault("kv_bits", None)
     return SimpleNamespace(**kw)
 
 
@@ -38,6 +39,7 @@ def _plan():
     return {
         "hf_id": "mlx-community/test",
         "kv_bits": 4,
+        "can_quantize": True,
         "kv_group_size": 64,
         "quantized_kv_start": 5000,
         "source": "measured",
@@ -57,7 +59,7 @@ def _plan():
 
 
 def test_run_reports_launch_argument_refusal(monkeypatch):
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: _plan())
     monkeypatch.setattr(
         cli.launcher,
         "build_argv",
@@ -75,8 +77,42 @@ def test_run_reports_launch_argument_refusal(monkeypatch):
         )
 
 
+def test_run_threads_kv_bits_to_plan(monkeypatch):
+    # --kv-bits on `run` opts into quant: it must reach plan() so a q4 fit backs a q4 run.
+    seen = {}
+
+    def plan(_model, margin_gb, kv_bits=None):
+        seen["kv_bits"] = kv_bits
+        return _plan()
+
+    monkeypatch.setattr(cli.launcher, "plan", plan)
+    monkeypatch.setattr(cli.launcher, "build_argv",
+                        lambda _rest, _plan, force: (_ for _ in ()).throw(
+                            cli.launcher.LaunchArgumentError("stop")))
+    with pytest.raises(SystemExit):
+        cli._run(["--model", "mlx-community/test", "--kv-bits", "4"],
+                 margin=2.0, force=False, dry_run=True)
+    assert seen["kv_bits"] == 4
+
+
+def test_run_defaults_to_fp16_plan(monkeypatch):
+    seen = {}
+
+    def plan(_model, margin_gb, kv_bits=None):
+        seen["kv_bits"] = kv_bits
+        return _plan()
+
+    monkeypatch.setattr(cli.launcher, "plan", plan)
+    monkeypatch.setattr(cli.launcher, "build_argv",
+                        lambda _rest, _plan, force: (_ for _ in ()).throw(
+                            cli.launcher.LaunchArgumentError("stop")))
+    with pytest.raises(SystemExit):
+        cli._run(["--model", "mlx-community/test"], margin=2.0, force=False, dry_run=True)
+    assert seen["kv_bits"] is None
+
+
 def test_run_refuses_prompt_above_cap(monkeypatch):
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: _plan())
     monkeypatch.setattr(cli.launcher, "build_argv", lambda rest, plan, *, force: rest)
     monkeypatch.setattr(
         cli.launcher,
@@ -101,7 +137,7 @@ def test_run_refuses_prompt_above_cap(monkeypatch):
 
 
 def test_run_warns_when_prompt_is_near_cap(monkeypatch, capsys):
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: _plan())
     monkeypatch.setattr(cli.launcher, "build_argv", lambda rest, plan, *, force: rest)
     monkeypatch.setattr(
         cli.launcher,
@@ -127,7 +163,7 @@ def test_run_warns_when_prompt_is_near_cap(monkeypatch, capsys):
 
 
 def test_run_force_bypasses_unverifiable_prompt_with_warning(monkeypatch, capsys):
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: _plan())
     monkeypatch.setattr(cli.launcher, "build_argv", lambda rest, plan, *, force: rest)
 
     cli._run(
@@ -141,7 +177,7 @@ def test_run_force_bypasses_unverifiable_prompt_with_warning(monkeypatch, capsys
 
 
 def test_run_reports_effective_user_cap(monkeypatch, capsys):
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: _plan())
 
     cli._run(
         [
@@ -161,7 +197,7 @@ def test_run_reports_effective_user_cap(monkeypatch, capsys):
 
 def test_run_passes_force_to_argument_validation(monkeypatch):
     seen = {}
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: _plan())
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: _plan())
 
     def build_argv(rest, plan, *, force):
         seen["force"] = force
@@ -181,7 +217,7 @@ def test_run_passes_force_to_argument_validation(monkeypatch):
 def test_run_accepts_equals_form_model_argument(monkeypatch):
     seen = {}
 
-    def plan(model_id, *, margin_gb):
+    def plan(model_id, *, margin_gb, kv_bits=None):
         seen["model_id"] = model_id
         return _plan()
 
@@ -205,7 +241,7 @@ def test_run_uses_margin_from_environment(monkeypatch):
     seen = {}
     monkeypatch.setenv(config.MARGIN_ENV, "3.25")
 
-    def plan(model_id, *, margin_gb):
+    def plan(model_id, *, margin_gb, kv_bits=None):
         seen["margin"] = margin_gb
         return _plan()
 
@@ -229,7 +265,7 @@ def test_run_explicit_margin_overrides_environment(monkeypatch):
     seen = {}
     monkeypatch.setenv(config.MARGIN_ENV, "3.25")
 
-    def plan(model_id, *, margin_gb):
+    def plan(model_id, *, margin_gb, kv_bits=None):
         seen["margin"] = margin_gb
         return _plan()
 
@@ -368,6 +404,25 @@ def test_characterize_uses_environment_margin(monkeypatch, tmp_path):
     assert seen["margin_gb"] == 3.0
 
 
+def test_characterize_threads_kv_bits(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli.db, "DB_PATH", tmp_path / "s.db")
+    seen = {}
+
+    def characterize(hf_id, *, margin_gb, allow_min_probe, repeats, ramp, console=None,
+                     kv_bits=None, **kw):
+        seen["kv_bits"] = kv_bits
+
+    monkeypatch.setattr(cli.probe, "characterize", characterize)
+    cli.cmd_characterize(_ns(hf_id="mlx-community/test", margin=None, min_probe=False,
+                             speed="standard", repeats=None, kv_bits=8))
+    assert seen["kv_bits"] == 8
+
+
+def test_characterize_kv_bits_defaults_to_fp16_none():
+    args = cli._build_parser().parse_args(["characterize", "mlx-community/test"])
+    assert args.kv_bits is None
+
+
 def test_characterize_speed_defaults_to_standard():
     args = cli._build_parser().parse_args(["characterize", "mlx-community/test"])
     assert args.speed == "standard"
@@ -416,7 +471,7 @@ def test_characterize_explicit_repeats_overrides_speed(monkeypatch, tmp_path):
 
 def test_run_warns_when_fit_is_stale(monkeypatch, capsys):
     plan = {**_plan(), "fit_stale": True}
-    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb: plan)
+    monkeypatch.setattr(cli.launcher, "plan", lambda _model, margin_gb, kv_bits=None: plan)
     monkeypatch.setattr(
         cli.launcher,
         "build_argv",

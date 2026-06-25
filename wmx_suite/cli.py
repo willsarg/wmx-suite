@@ -243,7 +243,7 @@ def cmd_characterize(args):
     con = db.connect()
     probe.characterize(models.resolve_hf_id(args.hf_id), margin_gb=margin,
                        allow_min_probe=args.min_probe, repeats=repeats, ramp=ramp,
-                       console=args.console,
+                       console=args.console, kv_bits=args.kv_bits,
                        prior_overhead_gb=profiles.cold_start_constants(con)[1],
                        recorder=_DbRecorder(con))
 
@@ -465,7 +465,13 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
             pass
         margin_gb += kokoro_overhead
 
-    p = launcher.plan(model_id, margin_gb=margin_gb)
+    # KV defaults to fp16; --kv-bits {8,4} opts into quant. Plan for the chosen precision so a
+    # q4 fit backs a q4 run (build_argv does the authoritative validation below).
+    try:
+        requested_kv_bits = launcher._single_int_option(rest, "--kv-bits")
+    except launcher.LaunchArgumentError:
+        requested_kv_bits = None
+    p = launcher.plan(model_id, margin_gb=margin_gb, kv_bits=requested_kv_bits)
     if p.get("error"):
         raise SystemExit(f"[run] {p['error']}")
 
@@ -488,7 +494,7 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
                         prior_overhead_gb=profiles.cold_start_constants(_con)[1],
                         recorder=_DbRecorder(_con))
                     # Re-plan with the newly saved fit
-                    p = launcher.plan(model_id, margin_gb=margin_gb)
+                    p = launcher.plan(model_id, margin_gb=margin_gb, kv_bits=requested_kv_bits)
                     if p.get("error"):
                         raise SystemExit(f"[run] Re-planning failed: {p['error']}")
                 except Exception as e:
@@ -502,8 +508,9 @@ def _run(rest: list[str], *, margin: float | str | None, force: bool,
     # same color/verbose policy as the rest of the CLI. Built at call time so
     # captured streams (tests) and the real stderr both work.
     console = Console(color=CONSOLE.color, verbose=CONSOLE.verbose, stream=sys.stderr)
-    kv_mode = ("fp16 (not quantizable)" if p["kv_bits"] is None
-               else f"{p['kv_bits']}-bit")
+    kv_mode = (f"{p['kv_bits']}-bit" if p["kv_bits"] is not None
+               else "fp16 (not quantizable)" if not p.get("can_quantize", True)
+               else "fp16")
     if p.get("fit_stale"):
         console.emit(console.style(
             "warn", "fit may be stale — consider re-running 'wmx-suite characterize'."))
@@ -634,6 +641,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=None,
                    help="isolated runs per context rung; the median high-water is used "
                         "(smooths prefill-transient jitter). Overrides the --speed preset.")
+    p.add_argument("--kv-bits", type=int, default=None,
+                   help="KV-cache quantization bits (8 or 4) to characterize at; omit for fp16 "
+                        "(default). Ignored for non-quantizable (sliding-window) models.")
     p.set_defaults(func=cmd_characterize)
     sub.add_parser("list").set_defaults(func=cmd_list)
     p = sub.add_parser("calibrate", help="measure this machine's cold-start overhead constant")

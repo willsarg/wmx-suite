@@ -35,6 +35,10 @@ def _install_plan_fakes(monkeypatch, *, info, fit, live_base=3.0):
     monkeypatch.setattr(launcher, "read_limits", lambda: limits)
     monkeypatch.setattr(launcher, "sample_settled_baseline", lambda: live_base)
     monkeypatch.setattr(launcher.db, "connect", lambda: object())
+    # Fits carry the kv_bits they were measured at; default the fakes to fp16 (None) so a
+    # default (fp16) plan reuses them — a mismatch must fall back to the conservative estimate.
+    if fit is not None and "fit_kv_bits" not in fit:
+        fit = {**fit, "fit_kv_bits": None}
     monkeypatch.setattr(launcher.db, "latest_fit", lambda _con, _hf_id: fit)
     monkeypatch.setattr(launcher.models, "fit_is_stale", lambda _hf_id, _created: False)
     monkeypatch.setattr(
@@ -43,9 +47,10 @@ def _install_plan_fakes(monkeypatch, *, info, fit, live_base=3.0):
     )
 
 
-def _plan_dict(*, kv_bits=4, max_kv_size=4096):
+def _plan_dict(*, kv_bits=4, max_kv_size=4096, can_quantize=True):
     return {
         "kv_bits": kv_bits,
+        "can_quantize": can_quantize,
         "kv_group_size": launcher.KV_GROUP_SIZE,
         "quantized_kv_start": launcher.QUANTIZED_KV_START,
         "max_kv_size": max_kv_size,
@@ -160,7 +165,8 @@ def test_plan_prefers_measured_fit(monkeypatch):
     result = launcher.plan("mlx-community/test")
     assert result["source"] == "measured"
     assert result["max_kv_size"] == 40000
-    assert result["kv_bits"] == 4
+    assert result["kv_bits"] is None        # fp16 is the default; quant is opt-in
+    assert result["can_quantize"] is True   # ...but this model *can* quantize on request
 
 
 def test_plan_marks_measured_fit_stale(monkeypatch):
@@ -235,7 +241,38 @@ def test_plan_omits_kv_quantization_for_rotating_cache(monkeypatch):
         info=_model_info(quantizable=False),
         fit={"model_base_gb": 8.0, "slope_gb_per_k": 0.1},
     )
-    assert launcher.plan("mlx-community/test")["kv_bits"] is None
+    p = launcher.plan("mlx-community/test")
+    assert p["kv_bits"] is None and p["can_quantize"] is False
+
+
+def test_plan_defaults_to_fp16(monkeypatch):
+    _install_plan_fakes(monkeypatch, info=_model_info(), fit=None)
+    p = launcher.plan("mlx-community/test")
+    assert p["kv_bits"] is None and p["can_quantize"] is True
+
+
+def test_plan_opts_into_kv_bits_for_quantizable_model(monkeypatch):
+    _install_plan_fakes(monkeypatch, info=_model_info(), fit=None)
+    p = launcher.plan("mlx-community/test", kv_bits=4)
+    assert p["kv_bits"] == 4
+
+
+def test_plan_forces_fp16_for_nonquantizable_even_if_kv_bits_requested(monkeypatch):
+    _install_plan_fakes(monkeypatch, info=_model_info(quantizable=False), fit=None)
+    p = launcher.plan("mlx-community/test", kv_bits=4)
+    assert p["kv_bits"] is None  # safety: RotatingKVCache must run fp16
+
+
+def test_plan_uses_fit_only_when_its_kv_bits_matches(monkeypatch):
+    # a fit measured at q4 must NOT back an fp16 plan: the q4 slope under-predicts fp16 memory.
+    _install_plan_fakes(
+        monkeypatch, info=_model_info(),
+        fit={"model_base_gb": 8.0, "slope_gb_per_k": 0.1, "fit_kv_bits": 4},
+    )
+    fp16_plan = launcher.plan("mlx-community/test")            # default fp16 → mismatch
+    q4_plan = launcher.plan("mlx-community/test", kv_bits=4)   # matches the q4 fit
+    assert fp16_plan["source"] == "estimated"   # fell back to the conservative a-priori estimate
+    assert q4_plan["source"] == "measured"
 
 
 def test_plan_uses_environment_margin_by_default(monkeypatch):
@@ -518,7 +555,7 @@ def test_build_argv_rejects_invalid_or_duplicate_kv_settings(args):
 )
 def test_build_argv_rejects_kv_quantization_for_rotating_cache_even_with_force(args):
     with pytest.raises(launcher.LaunchArgumentError, match="not quantizable"):
-        launcher.build_argv(args, _plan_dict(kv_bits=None), force=True)
+        launcher.build_argv(args, _plan_dict(kv_bits=None, can_quantize=False), force=True)
 
 
 @pytest.mark.parametrize(

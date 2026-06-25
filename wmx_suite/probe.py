@@ -188,7 +188,8 @@ class _NullRecorder:
 def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
                  allow_min_probe: bool = False, repeats: int = DEFAULT_REPEATS,
                  worker_python: str | None = None, verbose=True, console=None,
-                 prior_overhead_gb: float | None = None, recorder=None) -> dict:
+                 prior_overhead_gb: float | None = None, recorder=None,
+                 kv_bits: int | None = None) -> dict:
     ramp = ramp or DEFAULT_RAMP
     margin_gb = config.margin_gb(margin_gb)
     if prior_overhead_gb is None:
@@ -205,7 +206,9 @@ def characterize(hf_id: str, *, margin_gb: float | None = None, ramp=None,
     if not info.is_causal:
         raise SystemExit(f"[characterize] REFUSED: Model {hf_id} is not a supported causal language model.")
 
-    kv_bits = 4 if info.can_quantize_kv else None  # quantize only quantizable cache types
+    # fp16 by default (conservative + lossless); quant is opt-in. Forced fp16 for cache types
+    # that can't quantize (RotatingKVCache crashes past the quant threshold).
+    kv_bits = kv_bits if info.can_quantize_kv else None
     py = worker_python or sys.executable
 
     import mlx.core as mx
@@ -413,7 +416,7 @@ def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int, prior_overhead
 
     limits = read_limits()
     threshold = limits.safe_threshold_gb(margin_gb)
-    kv_bits = 4 if info.can_quantize_kv else None
+    kv_bits = None  # calibration measures fixed cold-start overhead; fp16 is the safe baseline
     py = worker_python or sys.executable
 
     def log(*a):
@@ -440,7 +443,7 @@ def _calibrate_one(hf_id: str, *, margin_gb: float, repeats: int, prior_overhead
 
     factor, overhead = profiles.DEFAULT_RESIDENT_FACTOR, prior_overhead_gb
     model_base = info.weights_gb * factor + overhead
-    slope = info.estimated_slope_gb_per_k()
+    slope = info.estimated_slope_gb_per_k(kv_bits)
 
     if con_out is not None:
         _view.render_header(con_out, {

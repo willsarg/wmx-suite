@@ -26,9 +26,10 @@ QUANTIZED_KV_START = 5000
 PROMPT_WARNING_FRACTION = 0.8
 
 
-def _estimated_slope_gb_per_k(info: models.ModelInfo) -> float:
-    """Conservative os-wired slope estimate for an uncharacterized model (GB per 1k tokens)."""
-    return info.estimated_slope_gb_per_k()
+def _estimated_slope_gb_per_k(info: models.ModelInfo, kv_bits: int | None = None) -> float:
+    """Conservative os-wired slope estimate for an uncharacterized model (GB per 1k tokens),
+    at the given KV precision (fp16 by default)."""
+    return info.estimated_slope_gb_per_k(kv_bits)
 
 
 @dataclass(frozen=True)
@@ -61,8 +62,15 @@ def predict(*, model_base_gb: float, slope_gb_per_k: float, live_base_gb: float,
                       breaches_wall=base_abs >= wall_gb, safe_ctx=cap)
 
 
-def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
-    """Decide kv_bits and a safe --max-kv-size for a launch, or refuse."""
+def plan(hf_id: str, *, margin_gb: float | None = None, kv_bits: int | None = None) -> dict:
+    """Decide a safe --max-kv-size for a launch at the given KV precision, or refuse.
+
+    KV defaults to fp16 (``kv_bits=None``) — the memory-conservative, lossless choice; the
+    caller opts into quant (8/4) explicitly. A non-quantizable cache type is forced to fp16
+    regardless (quantizing a RotatingKVCache crashes past the quant threshold). A stored fit is
+    reused only when it was measured at the *same* kv_bits; otherwise the q4-vs-fp16 slope
+    mismatch would mis-predict memory, so we fall back to the conservative a-priori estimate.
+    """
     info = models.describe(hf_id)
     if info is None:
         return {"error": f"model not found in HF cache: {hf_id}"}
@@ -75,12 +83,12 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
 
     wall = limits.wall_gb
     live_base = sample_settled_baseline()
-    kv_bits = KV_BITS if info.can_quantize_kv else None
+    kv_bits = kv_bits if info.can_quantize_kv else None  # fp16 forced for non-quantizable caches
 
     con = db.connect()
     fit = db.latest_fit(con, hf_id)
     cold_source = None
-    if fit and fit.get("slope_gb_per_k"):
+    if fit and fit.get("slope_gb_per_k") and fit.get("fit_kv_bits") == kv_bits:
         model_base = float(fit["model_base_gb"])
         slope = float(fit["slope_gb_per_k"])
         source = "measured"
@@ -88,14 +96,15 @@ def plan(hf_id: str, *, margin_gb: float | None = None) -> dict:
     else:
         factor, overhead, cold_source = profiles.cold_start_constants(con)
         model_base = info.weights_gb * factor + overhead
-        slope = _estimated_slope_gb_per_k(info)
+        slope = _estimated_slope_gb_per_k(info, kv_bits)
         source = "estimated"
         fit_stale = False
 
     pred = predict(model_base_gb=model_base, slope_gb_per_k=slope, live_base_gb=live_base,
                    threshold_gb=threshold, wall_gb=wall, model_max=info.max_context)
     p = {
-        "hf_id": hf_id, "kv_bits": kv_bits, "source": source,
+        "hf_id": hf_id, "kv_bits": kv_bits, "can_quantize": info.can_quantize_kv,
+        "source": source,
         "fit_stale": fit_stale, "cold_start_profile": cold_source,
         "max_kv_size_enforced": info.max_kv_size_enforced,
         "kv_group_size": KV_GROUP_SIZE, "quantized_kv_start": QUANTIZED_KV_START,
@@ -262,7 +271,7 @@ def build_argv(rest: list[str], p: dict, *, force: bool = False) -> list[str]:
         "--kv-group-size": user_kv_group_size,
         "--quantized-kv-start": user_quantized_kv_start,
     }
-    if p["kv_bits"] is None:
+    if not p["can_quantize"]:
         supplied = [option for option, value in kv_options.items() if value is not None]
         if supplied:
             raise LaunchArgumentError(

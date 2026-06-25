@@ -90,18 +90,19 @@ at non-trivial context.
 - The global safety margin defaults to 2 GB and can be set with
   `WMX_SUITE_MARGIN_GB`; an explicit `--margin` takes precedence. Reject negative,
   NaN, or infinite values.
-- **KV cache defaults to fp16; quantization is an opt-in lever.** The measurement (`measure_one`)
-  and one-shot (`generate`) workers default to fp16 KV and accept `--kv-bits {8,4}` to opt in;
-  `characterize` and the one-shot `run` stay consistent (both use whatever `--kv-bits` was given,
-  fp16 by default). fp16 is the memory-conservative, surprise-free default — the per-machine
-  safeguards (a-priori gate, measured-footprint check, refuse-before-load, watchdog) are what make
-  opting *into* a smaller quantized cache safe. When `--kv-bits` is set, the workers pass
-  `kv_group_size=64, quantized_kv_start=5000` to match production knobs. **Quantization is always
-  gated to quantizable cache types** — a `RotatingKVCache` (sliding-window) model is forced to fp16
+- **KV cache defaults to fp16 everywhere; quantization is an opt-in lever.** Every surface —
+  `characterize` (`probe`), the ARA measurement/`generate` workers, and the standalone `run`
+  launcher — defaults to fp16 KV and accepts `--kv-bits {8,4}` to opt in. fp16 is the
+  memory-conservative, surprise-free default; the per-machine safeguards (a-priori gate,
+  measured-footprint check, refuse-before-load, watchdog) are what make opting *into* a smaller
+  quantized cache safe. When `--kv-bits` is set, the workers pass `kv_group_size=64,
+  quantized_kv_start=5000` to match production knobs. **Quantization is always gated to
+  quantizable cache types** — a `RotatingKVCache` (sliding-window) model is forced to fp16
   regardless, because `--kv-bits` crashes it past the quant threshold (Rule #1).
-  - *Known divergence (follow-up):* the standalone launch planner (`launcher.py`) still
-    auto-selects `--kv-bits 4` for quantizable models. Aligning its default to fp16 needs
-    untangling `build_argv`'s "fp16-plan vs not-quantizable" conflation; tracked separately.
+  - **A stored fit is reused only when its `kv_bits` matches the planned launch** (`plan()`
+    checks `fit_kv_bits`): a q4-measured slope would under-predict fp16 memory, so on a mismatch
+    the planner falls back to the conservative a-priori estimate. `build_argv` keys its
+    "not quantizable" rejection on `can_quantize_kv`, not on whether the plan chose fp16.
 
 ## Testing requirements
 

@@ -60,7 +60,7 @@ def test_run_prompts_for_characterization(monkeypatch, tmp_path):
     ]
     
     plan_idx = [0]
-    def mock_plan(model_id, margin_gb=None):
+    def mock_plan(model_id, margin_gb=None, kv_bits=None):
         p = plans[plan_idx[0]]
         if plan_idx[0] < len(plans) - 1:
             plan_idx[0] += 1

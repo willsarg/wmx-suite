@@ -351,7 +351,7 @@ def gen_speeds(con: sqlite3.Connection) -> dict[str, list[float]]:
 def latest_fit(con: sqlite3.Connection, hf_id: str) -> dict | None:
     """Most recent fitted curve for a model, or None if never characterized."""
     row = con.execute(
-        "SELECT f.*, r.created_at AS characterized_at "
+        "SELECT f.*, r.created_at AS characterized_at, r.kv_bits AS fit_kv_bits "
         "FROM fits f JOIN probe_runs r ON f.run_id = r.id "
         "WHERE r.hf_id = ? ORDER BY f.id DESC LIMIT 1",
         (hf_id,),

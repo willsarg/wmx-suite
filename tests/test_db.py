@@ -50,6 +50,7 @@ def test_latest_fit_exposes_characterization_timestamp(monkeypatch, tmp_path):
     fit = db.latest_fit(con, "mlx-community/test")
 
     assert fit["characterized_at"]
+    assert fit["fit_kv_bits"] == 4   # the KV setting the fit was measured at (NULL = fp16)
 
 
 def test_latest_fits_returns_only_newest_fit(monkeypatch, tmp_path):
