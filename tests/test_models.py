@@ -261,3 +261,47 @@ def test_estimated_slope_zero_without_kv_metadata():
         can_quantize_kv=True, layer_types={},
     )
     assert info.estimated_slope_gb_per_k() == 0.0
+
+
+def _kv_info():
+    return models.ModelInfo(
+        hf_id="x", weights_gb=1.0, n_layers=4, growing_layers=2, kv_heads=8,
+        head_dim=128, hidden_size=1024, max_context=32768, cache_type="standard",
+        can_quantize_kv=True, layer_types={},
+    )
+
+
+def test_kv_bytes_per_token_fp16_default_matches_legacy():
+    info = _kv_info()
+    assert info.kv_bytes_per_token() == info.fp16_kv_bytes_per_token()
+    assert info.kv_bytes_per_token(None) == 2 * 8 * 128 * 2 * 2  # fp16: 2 bytes/elem
+
+
+@pytest.mark.parametrize(("kv_bits", "bytes_per_elem"), [
+    (8, 8 / 8 + 2 * 2 / 64),   # 8-bit payload + fp16 scale+bias per 64-elem group
+    (4, 4 / 8 + 2 * 2 / 64),
+])
+def test_kv_bytes_per_token_quantized_scales_by_bits(kv_bits, bytes_per_elem):
+    info = _kv_info()
+    elems = 2 * 8 * 128 * 2  # growing_layers * kv_heads * head_dim * (K,V)
+    assert info.kv_bytes_per_token(kv_bits) == pytest.approx(elems * bytes_per_elem)
+
+
+def test_kv_bytes_per_token_quantized_zero_without_metadata():
+    info = models.ModelInfo(
+        hf_id="x", weights_gb=1.0, n_layers=4, growing_layers=2, kv_heads=None,
+        head_dim=None, hidden_size=1024, max_context=32768, cache_type="standard",
+        can_quantize_kv=True, layer_types={},
+    )
+    assert info.kv_bytes_per_token(4) == 0.0
+
+
+def test_estimated_slope_is_kv_bits_aware():
+    info = _kv_info()
+    fp16 = info.estimated_slope_gb_per_k()
+    q8 = info.estimated_slope_gb_per_k(8)
+    q4 = info.estimated_slope_gb_per_k(4)
+    # quantized cache grows slower than fp16, and 4-bit slower than 8-bit
+    assert q4 < q8 < fp16
+    expected_q4 = info.kv_bytes_per_token(4) * 1000 / 1e9 * models.PREFILL_SPIKE_MULT
+    assert q4 == pytest.approx(expected_q4)

@@ -19,12 +19,17 @@ from wmx_suite import measure_one
 
 
 def _info(weights_gb=0.1, slope=0.01, is_causal=True, can_quant=True, max_ctx=None):
+    # KV-aware slope: fp16 (kv_bits=None) returns `slope`; quantized shrinks it
+    # (8-bit -> 0.5x, 4-bit -> 0.25x) so kv-quant threading is observable in tests.
+    def est_slope(kv_bits=None):
+        return slope if kv_bits is None else slope * (kv_bits / 16)
+
     return SimpleNamespace(
         weights_gb=weights_gb,
         is_causal=is_causal,
         can_quantize_kv=can_quant,
         max_context=max_ctx,
-        estimated_slope_gb_per_k=lambda: slope,
+        estimated_slope_gb_per_k=est_slope,
     )
 
 
@@ -106,6 +111,90 @@ def test_run_refuses_when_worker_load_errors(monkeypatch):
                         lambda hf, ctx, kv_bits, abort_wired_gb: {"status": "error", "note": "OOM loading"})
     out = measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0)
     assert out["refused"] is True and "OOM loading" in out["reason"]
+
+
+def test_gate_kv_quant_lowers_prediction_so_a_breaching_ctx_becomes_safe():
+    # fp16: steep slope at high ctx breaches the budget; q4 cache grows ~4x slower → fits.
+    fp16 = measure_one.safety_gate(
+        _info(slope=2.0), _limits(), ctx=20000, margin_gb=4.0, overhead_gb=1.0, live_base=8.0)
+    q4 = measure_one.safety_gate(
+        _info(slope=2.0), _limits(), ctx=20000, margin_gb=4.0, overhead_gb=1.0,
+        live_base=8.0, kv_bits=4)
+    assert fp16 is not None and q4 is None
+
+
+def test_gate_ignores_kv_bits_for_nonquantizable_model():
+    # a sliding-window model must be predicted (and run) at fp16 even if quant is requested
+    eff = measure_one.safety_gate(
+        _info(slope=2.0, can_quant=False), _limits(), ctx=20000, margin_gb=4.0,
+        overhead_gb=1.0, live_base=8.0, kv_bits=4)
+    fp16 = measure_one.safety_gate(
+        _info(slope=2.0, can_quant=False), _limits(), ctx=20000, margin_gb=4.0,
+        overhead_gb=1.0, live_base=8.0)
+    assert eff == fp16 and eff is not None  # quant request had no effect; still breaches
+
+
+def test_run_defaults_to_fp16(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(measure_one.models, "describe", lambda hf: _info())
+    monkeypatch.setattr(measure_one.system, "read_limits", lambda: _limits())
+    monkeypatch.setattr(measure_one.system, "sample_settled_baseline", lambda: 8.0)
+
+    def fake_spawn(hf, ctx, kv_bits, abort_wired_gb):
+        captured["kv_bits"] = kv_bits
+        return {"status": "ok", "os_wired_gb": 9.0, "baseline_wired_gb": 4.0}
+
+    monkeypatch.setattr(measure_one, "_spawn_worker", fake_spawn)
+    measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0, repeats=1)
+    assert captured["kv_bits"] is None
+
+
+def test_run_passes_user_kv_bits_for_quantizable_model(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(measure_one.models, "describe", lambda hf: _info(can_quant=True))
+    monkeypatch.setattr(measure_one.system, "read_limits", lambda: _limits())
+    monkeypatch.setattr(measure_one.system, "sample_settled_baseline", lambda: 8.0)
+
+    def fake_spawn(hf, ctx, kv_bits, abort_wired_gb):
+        captured["kv_bits"] = kv_bits
+        return {"status": "ok", "os_wired_gb": 9.0, "baseline_wired_gb": 4.0}
+
+    monkeypatch.setattr(measure_one, "_spawn_worker", fake_spawn)
+    measure_one.run("small/model", 4000, margin_gb=4.0, overhead_gb=1.0, repeats=1, kv_bits=4)
+    assert captured["kv_bits"] == 4
+
+
+def test_run_forces_fp16_for_nonquantizable_model_even_if_requested(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(measure_one.models, "describe", lambda hf: _info(can_quant=False))
+    monkeypatch.setattr(measure_one.system, "read_limits", lambda: _limits())
+    monkeypatch.setattr(measure_one.system, "sample_settled_baseline", lambda: 8.0)
+
+    def fake_spawn(hf, ctx, kv_bits, abort_wired_gb):
+        captured["kv_bits"] = kv_bits
+        return {"status": "ok", "os_wired_gb": 9.0, "baseline_wired_gb": 4.0}
+
+    monkeypatch.setattr(measure_one, "_spawn_worker", fake_spawn)
+    measure_one.run("sliding/model", 4000, margin_gb=4.0, overhead_gb=1.0, repeats=1, kv_bits=4)
+    assert captured["kv_bits"] is None  # safety: RotatingKVCache must run fp16
+
+
+def test_preflight_slope_is_kv_aware(monkeypatch):
+    monkeypatch.setattr(measure_one.models, "describe",
+                        lambda hf: _info(slope=0.02, max_ctx=8192))
+    monkeypatch.setattr(measure_one.system, "read_limits", lambda: _limits())
+    monkeypatch.setattr(measure_one.system, "sample_settled_baseline", lambda: 8.0)
+    est = measure_one.preflight("small/model", margin_gb=4.0, overhead_gb=1.0, kv_bits=4)
+    assert est["slope_gb_per_k"] == 0.02 * (4 / 16)  # reduced for q4
+
+
+def test_main_threads_kv_bits_to_run(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(measure_one, "run",
+                        lambda *a, **k: captured.update(k) or {"context": 4000, "mem_gb": 1.0})
+    measure_one.main(["small/model", "4000", "--margin", "4", "--overhead", "1",
+                      "--kv-bits", "4"])
+    assert captured["kv_bits"] == 4
 
 
 def test_run_passes_safe_budget_as_watchdog_limit(monkeypatch):

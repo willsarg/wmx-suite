@@ -31,6 +31,10 @@ UNBOUNDED_CUSTOM_CACHE_TYPES = {"qwen3_5", "qwen3_5_text"}
 # models we apply this multiplier so estimates stay conservative.
 PREFILL_SPIKE_MULT = 5.0
 
+# MLX quantized-KV group size (matches production: kv_group_size=64). Each group also carries
+# an fp16 scale + bias, the per-element overhead in kv_bytes_per_token().
+KV_GROUP_SIZE = 64
+
 
 @dataclass
 class ModelInfo:
@@ -48,17 +52,32 @@ class ModelInfo:
     max_kv_size_enforced: bool = True
     is_causal: bool = True
 
-    def fp16_kv_bytes_per_token(self) -> float:
-        """Analytic fp16 KV-cache growth per token (K and V), counting only growing layers.
-        Matches measured mlx_true slope closely on Gemma/Qwen."""
+    def kv_bytes_per_token(self, kv_bits: int | None = None) -> float:
+        """Analytic KV-cache growth per token (K and V), counting only growing layers.
+
+        ``kv_bits=None`` is fp16 (2 bytes/elem). A quantized cache stores ``kv_bits/8`` bytes
+        per element plus an fp16 scale + bias per ``KV_GROUP_SIZE`` group, so it grows
+        proportionally slower — the a-priori slope must reflect this or opting into quant
+        buys no extra context (the same lesson the Vulkan lane learned)."""
         if not (self.kv_heads and self.head_dim):
             return 0.0
-        return self.growing_layers * self.kv_heads * self.head_dim * 2 * 2  # 2=(K,V), 2 bytes fp16
+        elems = self.growing_layers * self.kv_heads * self.head_dim * 2  # 2 = (K, V)
+        if kv_bits is None:
+            bytes_per_elem = 2.0  # fp16
+        else:
+            bytes_per_elem = kv_bits / 8 + 2 * 2 / KV_GROUP_SIZE  # payload + fp16 scale+bias/group
+        return elems * bytes_per_elem
 
-    def estimated_slope_gb_per_k(self) -> float:
+    def fp16_kv_bytes_per_token(self) -> float:
+        """Back-compat alias: fp16 KV growth per token. Matches measured mlx_true slope
+        closely on Gemma/Qwen."""
+        return self.kv_bytes_per_token(None)
+
+    def estimated_slope_gb_per_k(self, kv_bits: int | None = None) -> float:
         """Conservative os-wired slope estimate (GB per 1k tokens) for an UNcharacterized
-        model: fp16 steady-state KV growth scaled by the prefill-spike multiplier."""
-        kv_slope = self.fp16_kv_bytes_per_token() * 1000 / 1e9
+        model: steady-state KV growth (at the given ``kv_bits``) scaled by the prefill-spike
+        multiplier. Defaults to fp16."""
+        kv_slope = self.kv_bytes_per_token(kv_bits) * 1000 / 1e9
         return kv_slope * PREFILL_SPIKE_MULT
 
     def as_dict(self) -> dict:

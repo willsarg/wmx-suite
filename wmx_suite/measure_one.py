@@ -28,13 +28,22 @@ from . import models, probe, profiles, system
 DEFAULT_REPEATS = 3
 
 
+def _effective_kv_bits(info, kv_bits: int | None) -> int | None:
+    """fp16 (None) for non-quantizable cache types — quantizing a RotatingKVCache model
+    raises NotImplementedError past the quant threshold and crashes (Rule #1). The lever is
+    honoured only where it is safe."""
+    return kv_bits if info.can_quantize_kv else None
+
+
 def safety_gate(info, limits, ctx: int, *, margin_gb: float, overhead_gb: float,
-                live_base: float) -> str | None:
+                live_base: float, kv_bits: int | None = None) -> str | None:
     """Return a refusal reason if probing (model, ctx) is unsafe, else None.
 
     Two independent refusals, both conservative (``>=`` — never round toward the wall):
     the base estimate must fit on its own (the model can load), and the predicted
     footprint at *ctx* (live baseline + model base + a-priori slope) must stay under budget.
+    The slope reflects ``kv_bits`` (fp16 by default), so opting into a quantized cache
+    predicts the smaller growth it actually has.
     """
     threshold = limits.safe_threshold_gb(margin_gb)
     est_base = probe.estimate_base_gb(info, limits, overhead_gb)
@@ -42,14 +51,16 @@ def safety_gate(info, limits, ctx: int, *, margin_gb: float, overhead_gb: float,
         return (f"base estimate {est_base:.2f}GB >= safe budget {threshold:.2f}GB — "
                 f"won't load")
     model_base = info.weights_gb * profiles.DEFAULT_RESIDENT_FACTOR + overhead_gb
-    predicted = live_base + model_base + info.estimated_slope_gb_per_k() * (ctx / 1000)
+    slope = info.estimated_slope_gb_per_k(_effective_kv_bits(info, kv_bits))
+    predicted = live_base + model_base + slope * (ctx / 1000)
     if predicted >= threshold:
         return (f"predicted {predicted:.2f}GB at {ctx} tok >= safe budget "
                 f"{threshold:.2f}GB")
     return None
 
 
-def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float) -> dict:
+def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float,
+              kv_bits: int | None = None) -> dict:
     """No-load estimate for ARA's scheduler: the context→0 base, a-priori slope, budget.
 
     ARA owns the ramp methodology but not model knowledge, so the engine supplies the
@@ -66,7 +77,7 @@ def preflight(hf_id: str, *, margin_gb: float, overhead_gb: float) -> dict:
     return {
         "base_gb": round(live_base + model_base, 4),   # absolute, for ARA's a-priori gate
         "ref_baseline_gb": round(live_base, 4),        # live OS baseline, added at solve time
-        "slope_gb_per_k": info.estimated_slope_gb_per_k(),
+        "slope_gb_per_k": info.estimated_slope_gb_per_k(_effective_kv_bits(info, kv_bits)),
         "budget_gb": limits.safe_threshold_gb(margin_gb),
         "max_context": info.max_context,
     }
@@ -87,7 +98,7 @@ def _refused(ctx: int, reason: str) -> dict:
 
 
 def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
-        repeats: int = DEFAULT_REPEATS) -> dict:
+        repeats: int = DEFAULT_REPEATS, kv_bits: int | None = None) -> dict:
     """Gate then (if safe) measure; return the canonical result dict.
 
     ``mem_gb`` is the model's DELTA over its own launch baseline (``os_wired - baseline``),
@@ -102,12 +113,12 @@ def run(hf_id: str, ctx: int, *, margin_gb: float, overhead_gb: float,
 
     limits = system.read_limits()
     live_base = system.sample_settled_baseline()
+    kv_bits = _effective_kv_bits(info, kv_bits)
     reason = safety_gate(info, limits, ctx, margin_gb=margin_gb,
-                         overhead_gb=overhead_gb, live_base=live_base)
+                         overhead_gb=overhead_gb, live_base=live_base, kv_bits=kv_bits)
     if reason is not None:
         return _refused(ctx, reason)
 
-    kv_bits = 4 if info.can_quantize_kv else None
     threshold = limits.safe_threshold_gb(margin_gb)
     deltas = []
     for _ in range(max(1, repeats)):
@@ -127,12 +138,16 @@ def main(argv=None) -> None:
     ap.add_argument("--preflight", action="store_true",
                     help="print the no-load estimate (base/slope/budget) and exit")
     ap.add_argument("--repeats", type=int, default=DEFAULT_REPEATS)
+    ap.add_argument("--kv-bits", type=int, default=None,
+                    help="KV-cache quantization bits (8 or 4); omit for fp16. Ignored for "
+                         "non-quantizable (sliding-window) models.")
     args = ap.parse_args(argv)
     if args.preflight:
-        result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead)
+        result = preflight(args.hf_id, margin_gb=args.margin, overhead_gb=args.overhead,
+                           kv_bits=args.kv_bits)
     else:
         result = run(args.hf_id, args.ctx, margin_gb=args.margin,
-                     overhead_gb=args.overhead, repeats=args.repeats)
+                     overhead_gb=args.overhead, repeats=args.repeats, kv_bits=args.kv_bits)
     print(json.dumps(result), flush=True)
 
 

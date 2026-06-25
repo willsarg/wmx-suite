@@ -90,8 +90,18 @@ at non-trivial context.
 - The global safety margin defaults to 2 GB and can be set with
   `WMX_SUITE_MARGIN_GB`; an explicit `--margin` takes precedence. Reject negative,
   NaN, or infinite values.
-- Match **production inference settings** when measuring: `run` uses `--kv-bits 4` with
-  `kv_group_size=64`, `quantized_kv_start=5000` — but only for quantizable models.
+- **KV cache defaults to fp16; quantization is an opt-in lever.** The measurement (`measure_one`)
+  and one-shot (`generate`) workers default to fp16 KV and accept `--kv-bits {8,4}` to opt in;
+  `characterize` and the one-shot `run` stay consistent (both use whatever `--kv-bits` was given,
+  fp16 by default). fp16 is the memory-conservative, surprise-free default — the per-machine
+  safeguards (a-priori gate, measured-footprint check, refuse-before-load, watchdog) are what make
+  opting *into* a smaller quantized cache safe. When `--kv-bits` is set, the workers pass
+  `kv_group_size=64, quantized_kv_start=5000` to match production knobs. **Quantization is always
+  gated to quantizable cache types** — a `RotatingKVCache` (sliding-window) model is forced to fp16
+  regardless, because `--kv-bits` crashes it past the quant threshold (Rule #1).
+  - *Known divergence (follow-up):* the standalone launch planner (`launcher.py`) still
+    auto-selects `--kv-bits 4` for quantizable models. Aligning its default to fp16 needs
+    untangling `build_argv`'s "fp16-plan vs not-quantizable" conflation; tracked separately.
 
 ## Testing requirements
 

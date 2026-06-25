@@ -46,7 +46,7 @@ def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
 
 
 def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
-             overhead_gb: float, max_tokens: int) -> dict:
+             overhead_gb: float, max_tokens: int, kv_bits: int | None = None) -> dict:
     """Gate then (if safe) load + generate; return the canonical result dict.
 
     Refuses before loading if the model is unknown/non-causal or if the shared safety
@@ -73,10 +73,15 @@ def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
     prompt_tokens = _count_prompt_tokens(hf_id, prompt)
     effective_ctx = min(ctx, prompt_tokens + max_tokens)
 
+    # fp16 (None) unless the cache type can quantize — keeps run consistent with characterize
+    # and never quantizes a RotatingKVCache model (which would crash past the quant threshold).
+    kv_bits = measure_one._effective_kv_bits(info, kv_bits)
+
     limits = system.read_limits()
     live_base = system.sample_settled_baseline()
     reason = measure_one.safety_gate(info, limits, effective_ctx, margin_gb=margin_gb,
-                                     overhead_gb=overhead_gb, live_base=live_base)
+                                     overhead_gb=overhead_gb, live_base=live_base,
+                                     kv_bits=kv_bits)
     if reason is not None:
         return _refused(ctx, reason)
 
@@ -84,8 +89,11 @@ def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
     # tests can monkeypatch sys.modules["mlx_lm"].
     from mlx_lm import generate as mlx_generate, load
 
+    # Match production quant knobs when quantizing; pass nothing for fp16 (mlx_lm default).
+    kv_kwargs = ({} if kv_bits is None
+                 else {"kv_bits": kv_bits, "kv_group_size": 64, "quantized_kv_start": 5000})
     model, tok = load(hf_id)
-    text = mlx_generate(model, tok, prompt=prompt, max_tokens=max_tokens)
+    text = mlx_generate(model, tok, prompt=prompt, max_tokens=max_tokens, **kv_kwargs)
     return {"context": ctx, "completion": text}
 
 
@@ -96,10 +104,14 @@ def main(argv=None) -> None:
     ap.add_argument("--margin", type=float, required=True)
     ap.add_argument("--overhead", type=float, required=True)
     ap.add_argument("--max-tokens", type=int, required=True)
+    ap.add_argument("--kv-bits", type=int, default=None,
+                    help="KV-cache quantization bits (8 or 4); omit for fp16. Ignored for "
+                         "non-quantizable (sliding-window) models.")
     args = ap.parse_args(argv)
     prompt = sys.stdin.read()
     result = generate(args.hf_id, args.ctx, prompt=prompt, margin_gb=args.margin,
-                      overhead_gb=args.overhead, max_tokens=args.max_tokens)
+                      overhead_gb=args.overhead, max_tokens=args.max_tokens,
+                      kv_bits=args.kv_bits)
     print(json.dumps(result), flush=True)
 
 

@@ -27,7 +27,7 @@ def _info(weights_gb=0.1, slope=0.01, is_causal=True, can_quant=True, max_ctx=No
         is_causal=is_causal,
         can_quantize_kv=can_quant,
         max_context=max_ctx,
-        estimated_slope_gb_per_k=lambda: slope,
+        estimated_slope_gb_per_k=lambda kv_bits=None: slope,
     )
 
 
@@ -59,6 +59,7 @@ def _fake_mlx(monkeypatch, completion="hello world"):
         captured["tok"] = tok
         captured["prompt"] = prompt
         captured["max_tokens"] = max_tokens
+        captured["kw"] = kw
         return completion
 
     monkeypatch.setitem(sys.modules, "mlx_lm",
@@ -101,6 +102,41 @@ def test_generate_happy_path_returns_completion(monkeypatch):
     assert captured["max_tokens"] == 16
 
 
+def test_generate_defaults_to_fp16_no_kv_args(monkeypatch):
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(generate.measure_one, "safety_gate", lambda *a, **k: None)
+    _fake_tokenizer(monkeypatch, n_tokens=5)
+    captured = _fake_mlx(monkeypatch)
+    generate.generate("small/model", 4000, prompt="hi", margin_gb=4.0, overhead_gb=1.0,
+                      max_tokens=16)
+    assert "kv_bits" not in captured["kw"]  # fp16: no quant args passed to mlx_lm
+
+
+def test_generate_passes_kv_bits_when_quantizable(monkeypatch):
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info(can_quant=True))
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(generate.measure_one, "safety_gate", lambda *a, **k: None)
+    _fake_tokenizer(monkeypatch, n_tokens=5)
+    captured = _fake_mlx(monkeypatch)
+    generate.generate("small/model", 4000, prompt="hi", margin_gb=4.0, overhead_gb=1.0,
+                      max_tokens=16, kv_bits=4)
+    assert captured["kw"]["kv_bits"] == 4
+    assert captured["kw"]["kv_group_size"] == 64
+    assert captured["kw"]["quantized_kv_start"] == 5000  # match production knobs
+
+
+def test_generate_forces_fp16_for_nonquantizable_model(monkeypatch):
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info(can_quant=False))
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(generate.measure_one, "safety_gate", lambda *a, **k: None)
+    _fake_tokenizer(monkeypatch, n_tokens=5)
+    captured = _fake_mlx(monkeypatch)
+    generate.generate("sliding/model", 4000, prompt="hi", margin_gb=4.0, overhead_gb=1.0,
+                      max_tokens=16, kv_bits=4)
+    assert "kv_bits" not in captured["kw"]  # RotatingKVCache must run fp16 (Rule #1)
+
+
 def test_generate_refuses_unknown_or_noncausal_model(monkeypatch):
     monkeypatch.setattr(generate.models, "describe", lambda hf: None)
     out = generate.generate("mystery/model", 4000, prompt="hi",
@@ -140,7 +176,7 @@ def test_generate_passes_gate_args_like_measure_one(monkeypatch):
     monkeypatch.setattr(generate.system, "read_limits", lambda: _limits())
     monkeypatch.setattr(generate.system, "sample_settled_baseline", lambda: 7.5)
 
-    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base, kv_bits=None):
         captured.update(ctx=ctx, margin_gb=margin_gb, overhead_gb=overhead_gb,
                         live_base=live_base)
         return None
@@ -162,7 +198,7 @@ def test_generate_gates_on_effective_context_not_ceiling(monkeypatch):
     monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
     _patch_safe_env(monkeypatch)
 
-    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base, kv_bits=None):
         seen["ctx"] = ctx
         return None
 
@@ -182,7 +218,7 @@ def test_generate_caps_effective_context_at_ceiling(monkeypatch):
     monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
     _patch_safe_env(monkeypatch)
 
-    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base, kv_bits=None):
         seen["ctx"] = ctx
         return None
 
@@ -202,7 +238,7 @@ def test_generate_empty_prompt_counts_zero_tokens(monkeypatch):
     monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
     _patch_safe_env(monkeypatch)
 
-    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base):
+    def fake_gate(info, limits, ctx, *, margin_gb, overhead_gb, live_base, kv_bits=None):
         seen["ctx"] = ctx
         return None
 
@@ -224,9 +260,10 @@ def test_generate_empty_prompt_counts_zero_tokens(monkeypatch):
 def test_main_reads_prompt_from_stdin_prints_one_json_line(monkeypatch, capsys):
     seen = {}
 
-    def fake_generate(hf_id, ctx, *, prompt, margin_gb, overhead_gb, max_tokens):
+    def fake_generate(hf_id, ctx, *, prompt, margin_gb, overhead_gb, max_tokens,
+                      kv_bits=None):
         seen.update(hf_id=hf_id, ctx=ctx, prompt=prompt, margin_gb=margin_gb,
-                    overhead_gb=overhead_gb, max_tokens=max_tokens)
+                    overhead_gb=overhead_gb, max_tokens=max_tokens, kv_bits=kv_bits)
         return {"context": ctx, "completion": "ok"}
 
     monkeypatch.setattr(generate, "generate", fake_generate)
@@ -236,7 +273,17 @@ def test_main_reads_prompt_from_stdin_prints_one_json_line(monkeypatch, capsys):
     line = capsys.readouterr().out.strip()
     assert json.loads(line) == {"context": 4000, "completion": "ok"}
     assert seen == {"hf_id": "small/model", "ctx": 4000, "prompt": "explain quicksort",
-                    "margin_gb": 4.0, "overhead_gb": 1.0, "max_tokens": 32}
+                    "margin_gb": 4.0, "overhead_gb": 1.0, "max_tokens": 32, "kv_bits": None}
+
+
+def test_main_threads_kv_bits_to_generate(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(generate, "generate",
+                        lambda *a, **k: seen.update(k) or {"context": 1, "completion": "x"})
+    monkeypatch.setattr("sys.stdin", io.StringIO("hi"))
+    generate.main(["small/model", "4000", "--margin", "4", "--overhead", "1",
+                   "--max-tokens", "8", "--kv-bits", "8"])
+    assert seen["kv_bits"] == 8
 
 
 def test_main_prints_refusal_json_line(monkeypatch, capsys):
