@@ -624,3 +624,239 @@ def test_main_threads_kv_bits_to_serve(monkeypatch):
     serve.main(["my/model", "4096", "--margin", "4", "--overhead", "1",
                 "--port", "8080", "--kv-bits", "8"])
     assert seen["kv_bits"] == 8
+
+
+# --------------------------------------------------------------------------- #
+# do_POST helper — invoke do_POST without a real socket
+# --------------------------------------------------------------------------- #
+
+def _run_do_post(monkeypatch, body_bytes, *, path="/v1/chat/completions",
+                 content_length=None, model="MODEL", tokenizer=None,
+                 ceiling=100, kv_bits=None, hf_id="test/model"):
+    """Create a handler instance via __new__, wire fake I/O, call do_POST, return (status, raw)."""
+    if tokenizer is None:
+        tokenizer = _FakeTok()
+    handler_cls = serve._make_handler(model, tokenizer, ceiling, kv_bits, hf_id)
+    inst = handler_cls.__new__(handler_cls)
+
+    cl = content_length if content_length is not None else len(body_bytes)
+    inst.path = path
+    inst.headers = {"Content-Length": str(cl)}
+    inst.rfile = io.BytesIO(body_bytes)
+
+    wfile = io.BytesIO()
+    inst.wfile = wfile
+    status_holder = [None]
+    resp_headers: dict = {}
+
+    inst.send_response = lambda code: status_holder.__setitem__(0, code)
+    inst.send_header = lambda k, v: resp_headers.__setitem__(k, v)
+    inst.end_headers = lambda: None
+
+    inst.do_POST()
+    return status_holder[0], wfile.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1 — streaming truncation: final yield with text + finish_reason is emitted
+# --------------------------------------------------------------------------- #
+
+def test_stream_completions_final_text_with_finish_reason_is_emitted(monkeypatch):
+    """Last stream yield (text='!', finish_reason='stop') must appear in SSE content."""
+    responses = [
+        _FakeStreamResponse("Hello", None),
+        _FakeStreamResponse("!", "stop"),  # text AND finish_reason — must NOT be dropped
+    ]
+    _fake_mlx_stream_generate(monkeypatch, responses)
+
+    handler = _FakeHandler()
+    serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+        handler=handler,
+    )
+
+    output = handler.wfile.getvalue().decode()
+    all_content = []
+    for ln in output.split("\n"):
+        if ln.startswith("data:") and ln != "data: [DONE]":
+            chunk = json.loads(ln[len("data: "):])
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                all_content.append(delta["content"])
+
+    assert "!" in all_content, "Final text from last stream chunk was dropped"
+
+
+# --------------------------------------------------------------------------- #
+# Fix 2 — [DONE] sent even when stream_generate raises mid-stream
+# --------------------------------------------------------------------------- #
+
+def test_stream_completions_sends_done_on_mid_stream_exception(monkeypatch):
+    """A mid-stream exception must still write data: [DONE] before propagating."""
+
+    def bad_stream(model, tok, prompt, max_tokens=None, **kw):
+        yield _FakeStreamResponse("partial", None)
+        raise RuntimeError("GPU OOM")
+
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(stream_generate=bad_stream, generate=None, load=None),
+    )
+
+    handler = _FakeHandler()
+    with pytest.raises(RuntimeError, match="GPU OOM"):
+        serve._stream_completions(
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+            _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+            handler=handler,
+        )
+
+    output = handler.wfile.getvalue().decode()
+    assert "data: [DONE]" in output
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3 — first SSE chunk carries delta.role == "assistant"
+# --------------------------------------------------------------------------- #
+
+def test_stream_completions_first_chunk_has_role_assistant(monkeypatch):
+    """First SSE chunk must carry delta.role == 'assistant' (OpenAI shape)."""
+    _fake_mlx_stream_generate(monkeypatch, [
+        _FakeStreamResponse("hello", None),
+        _FakeStreamResponse("", "stop"),
+    ])
+
+    handler = _FakeHandler()
+    serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+        handler=handler,
+    )
+
+    output = handler.wfile.getvalue().decode()
+    data_lines = [ln for ln in output.split("\n")
+                  if ln.startswith("data:") and ln != "data: [DONE]"]
+    first_chunk = json.loads(data_lines[0][len("data: "):])
+    assert first_chunk["choices"][0]["delta"].get("role") == "assistant"
+
+
+# --------------------------------------------------------------------------- #
+# Fix 4 — negative / zero max_tokens rejected before generation
+# --------------------------------------------------------------------------- #
+
+def test_handle_completions_rejects_negative_max_tokens(monkeypatch):
+    _fake_mlx_generate(monkeypatch)  # must NOT be called
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": -1},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+    )
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert "max_tokens" in body["error"]["message"]
+
+
+def test_handle_completions_rejects_zero_max_tokens(monkeypatch):
+    _fake_mlx_generate(monkeypatch)  # must NOT be called
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+    )
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+
+
+def test_stream_completions_rejects_negative_max_tokens(monkeypatch):
+    """Streaming: max_tokens <= 0 returns (400, error) before any SSE output."""
+    _fake_mlx_stream_generate(monkeypatch, [])  # must NOT be called
+    handler = _FakeHandler()
+    result = serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": -1},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+        handler=handler,
+    )
+    assert result is not None
+    status, body = result
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert handler._response_code is None  # no SSE headers written
+
+
+# --------------------------------------------------------------------------- #
+# Fix 5 — Content-Length > 1MB → 413 before reading body
+# --------------------------------------------------------------------------- #
+
+def test_do_post_returns_413_when_content_length_exceeds_limit(monkeypatch):
+    _fake_mlx_generate(monkeypatch)
+    status, raw = _run_do_post(
+        monkeypatch, b"ignored",
+        content_length=1_048_577,
+    )
+    assert status == 413
+
+
+# --------------------------------------------------------------------------- #
+# Fix 6 — non-dict JSON body → 400
+# --------------------------------------------------------------------------- #
+
+def test_do_post_returns_400_for_non_dict_body(monkeypatch):
+    """JSON body that is a list (not a dict) → 400 invalid_request_error."""
+    _fake_mlx_generate(monkeypatch)
+    body_bytes = json.dumps([]).encode()
+    status, raw = _run_do_post(monkeypatch, body_bytes)
+    assert status == 400
+    resp = json.loads(raw)
+    assert resp["error"]["type"] == "invalid_request_error"
+
+
+# --------------------------------------------------------------------------- #
+# Fix 7 — multiple tool_call blocks → multiple tool_calls; unterminated → text
+# --------------------------------------------------------------------------- #
+
+class _MultiToolTok(_FakeTok):
+    """Tokenizer stub that parses multiple tool blocks; name encodes call order."""
+
+    has_tool_calling = True
+    tool_call_start = "<tool_call>"
+    tool_call_end = "</tool_call>"
+    _counter = 0
+
+    def apply_chat_template(self, messages, *, tokenize=False, add_generation_prompt=True,
+                             tools=None):
+        return " ".join(m.get("content", "") for m in messages)
+
+    def tool_parser(self, text, tools):  # noqa: ARG002
+        self._counter += 1
+        return {"name": f"fn{self._counter}", "arguments": {"n": self._counter}}
+
+
+def test_handle_completions_parses_multiple_tool_call_blocks(monkeypatch):
+    """Two sequential <tool_call> blocks → two entries in tool_calls."""
+    text = "<tool_call>args1</tool_call><tool_call>args2</tool_call>"
+    _fake_mlx_generate(monkeypatch, completion=text)
+
+    tok = _MultiToolTok()
+    tools = [{"type": "function", "function": {"name": "fn1"}},
+             {"type": "function", "function": {"name": "fn2"}}]
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "tools": tools},
+        tok, "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+    )
+    assert status == 200
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(body["choices"][0]["message"]["tool_calls"]) == 2
+
+
+def test_handle_completions_unterminated_tool_marker_falls_through_to_text(monkeypatch):
+    """tool_call_start present but tool_call_end absent → plain-text fallback, no crash."""
+    text = "<tool_call>no closing tag"
+    _fake_mlx_generate(monkeypatch, completion=text)
+
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "tools": tools},
+        _ToolTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+    )
+    assert status == 200
+    assert body["choices"][0]["message"]["content"] == text
+    assert body["choices"][0]["finish_reason"] == "stop"

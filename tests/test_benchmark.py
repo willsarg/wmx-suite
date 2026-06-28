@@ -283,3 +283,33 @@ def test_main_default_max_tokens_is_256(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("[]"))
     benchmark.main(["org/m", "4096", "--margin", "4", "--overhead", "1"])
     assert seen["max_tokens"] == 256
+
+
+# --------------------------------------------------------------------------- #
+# Fix 8 — per-prompt exception → error entry, run continues, result always emitted
+# --------------------------------------------------------------------------- #
+
+def test_run_prompts_continues_after_per_prompt_exception():
+    """Exception in mlx_generate for prompt index 1 → error entry; 0 and 2 still complete."""
+
+    def flaky_gen(model, tok, prompt=None, max_tokens=None, **kw):
+        if "crash" in prompt:
+            raise RuntimeError("OOM on prompt")
+        return f"ok: {prompt}"
+
+    results = benchmark._run_prompts(
+        ["good one", "crash me", "good two"],
+        _word_tok(),
+        max_tokens=100,
+        ceiling=512,
+        effective_kv=None,
+        mlx_generate=flaky_gen,
+        model="M",
+    )
+
+    assert len(results) == 3
+    assert results[0] == {"prompt_index": 0, "completion": "ok: good one"}
+    assert results[1]["prompt_index"] == 1
+    assert "error" in results[1]
+    assert "OOM on prompt" in results[1]["error"]
+    assert results[2] == {"prompt_index": 2, "completion": "ok: good two"}

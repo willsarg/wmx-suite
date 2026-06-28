@@ -55,8 +55,11 @@ def _run_prompts(prompts: list[str], tokenizer, *, max_tokens: int, ceiling: int
             results.append({"prompt_index": i, "refused": True,
                             "reason": f"prompt fills context ceiling {ceiling}"})
         else:
-            text = mlx_generate(model, tokenizer, prompt=p, max_tokens=allowed, **kv_kwargs)
-            results.append({"prompt_index": i, "completion": text})
+            try:
+                text = mlx_generate(model, tokenizer, prompt=p, max_tokens=allowed, **kv_kwargs)
+                results.append({"prompt_index": i, "completion": text})
+            except Exception as exc:
+                results.append({"prompt_index": i, "error": str(exc)})
     return results
 
 

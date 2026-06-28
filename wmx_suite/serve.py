@@ -121,6 +121,13 @@ def _handle_completions(body: dict, tokenizer, model, ceiling: int,
     """
     messages = body.get("messages", [])
     requested_max = int(body.get("max_tokens", 512))
+    if requested_max <= 0:
+        return (400, {
+            "error": {
+                "message": "max_tokens must be positive",
+                "type": "invalid_request_error",
+            }
+        })
     tools = body.get("tools") or None
 
     prompt = _render_messages(tokenizer, messages, tools=tools)
@@ -144,37 +151,46 @@ def _handle_completions(body: dict, tokenizer, model, ceiling: int,
                  else {"kv_bits": kv_bits, "kv_group_size": 64, "quantized_kv_start": 5000})
     text = mlx_generate(model, tokenizer, prompt=prompt, max_tokens=allowed, **kv_kwargs)
 
-    # Tool-calling: parse model output when tool markers are present.
+    # Tool-calling: scan ALL <tool_call>…</tool_call> blocks (parallel calls).
+    # If the start marker is present but no end marker is found, fall through to text.
     if (tools and getattr(tokenizer, "has_tool_calling", False)
             and tokenizer.tool_call_start in text):
         try:
-            start = text.index(tokenizer.tool_call_start) + len(tokenizer.tool_call_start)
-            end = text.index(tokenizer.tool_call_end, start)
-            tool_text = text[start:end]
-            parsed = tokenizer.tool_parser(tool_text, tools)
-            if isinstance(parsed, dict):
-                parsed = [parsed]
-            tool_calls = [
-                {
-                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc["arguments"]),
-                    },
-                }
-                for tc in parsed
-            ]
-            return (200, {
-                "object": "chat.completion",
-                "model": hf_id,
-                "choices": [
-                    {"index": 0,
-                     "message": {"role": "assistant", "content": None,
-                                 "tool_calls": tool_calls},
-                     "finish_reason": "tool_calls"},
-                ],
-            })
+            tool_calls = []
+            search_start = 0
+            while True:
+                start_idx = text.find(tokenizer.tool_call_start, search_start)
+                if start_idx == -1:
+                    break
+                content_start = start_idx + len(tokenizer.tool_call_start)
+                end_idx = text.find(tokenizer.tool_call_end, content_start)
+                if end_idx == -1:
+                    break  # unterminated marker — stop scanning, fall through to text
+                tool_text = text[content_start:end_idx]
+                parsed = tokenizer.tool_parser(tool_text, tools)
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+                for tc in parsed:
+                    tool_calls.append({
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"]),
+                        },
+                    })
+                search_start = end_idx + len(tokenizer.tool_call_end)
+            if tool_calls:
+                return (200, {
+                    "object": "chat.completion",
+                    "model": hf_id,
+                    "choices": [
+                        {"index": 0,
+                         "message": {"role": "assistant", "content": None,
+                                     "tool_calls": tool_calls},
+                         "finish_reason": "tool_calls"},
+                    ],
+                })
         except Exception:
             pass  # Parse failed — fall through to plain text response.
 
@@ -199,6 +215,13 @@ def _stream_completions(body: dict, tokenizer, model, ceiling: int,
     """
     messages = body.get("messages", [])
     requested_max = int(body.get("max_tokens", 512))
+    if requested_max <= 0:
+        return (400, {
+            "error": {
+                "message": "max_tokens must be positive",
+                "type": "invalid_request_error",
+            }
+        })
     tools = body.get("tools") or None
 
     prompt = _render_messages(tokenizer, messages, tools=tools)
@@ -230,20 +253,41 @@ def _stream_completions(body: dict, tokenizer, model, ceiling: int,
     chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
     finish_reason = "stop"
 
-    for resp in stream_generate(model, tokenizer, prompt, max_tokens=allowed, **kv_kwargs):
-        if resp.finish_reason is None and resp.text:
-            chunk = json.dumps({
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "model": hf_id,
-                "choices": [
-                    {"index": 0, "delta": {"content": resp.text}, "finish_reason": None},
-                ],
-            })
-            handler.wfile.write(f"data: {chunk}\n\n".encode())
+    # Initial role chunk (OpenAI shape): role must arrive before any content deltas.
+    role_chunk = json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "model": hf_id,
+        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+    })
+    handler.wfile.write(f"data: {role_chunk}\n\n".encode())
+    handler.wfile.flush()
+
+    try:
+        for resp in stream_generate(model, tokenizer, prompt, max_tokens=allowed, **kv_kwargs):
+            # Emit content delta whenever text is non-empty — including the final yield from
+            # detokenizer.finalize() which carries text AND a non-None finish_reason.
+            if resp.text:
+                chunk = json.dumps({
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "model": hf_id,
+                    "choices": [
+                        {"index": 0, "delta": {"content": resp.text}, "finish_reason": None},
+                    ],
+                })
+                handler.wfile.write(f"data: {chunk}\n\n".encode())
+                handler.wfile.flush()
+            if resp.finish_reason is not None:
+                finish_reason = resp.finish_reason
+    except Exception:
+        # Best-effort [DONE] before propagating so clients can cleanly end the stream.
+        try:
+            handler.wfile.write(b"data: [DONE]\n\n")
             handler.wfile.flush()
-        if resp.finish_reason is not None:
-            finish_reason = resp.finish_reason
+        except Exception:
+            pass
+        raise
 
     # Final chunk carries finish_reason; then the sentinel.
     final = json.dumps({
@@ -275,10 +319,18 @@ def _make_handler(model, tokenizer, ceiling: int, kv_bits: int | None, hf_id: st
                                            "type": "not_found"}})
                 return
             length = int(self.headers.get("Content-Length", 0))
+            if length > 1_048_576:
+                self._json(413, {"error": {"message": "request body too large",
+                                           "type": "invalid_request_error"}})
+                return
             try:
                 body = json.loads(self.rfile.read(length))
             except Exception as exc:
                 self._json(400, {"error": {"message": str(exc),
+                                           "type": "invalid_request_error"}})
+                return
+            if not isinstance(body, dict):
+                self._json(400, {"error": {"message": "request body must be a JSON object",
                                            "type": "invalid_request_error"}})
                 return
 
