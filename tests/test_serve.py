@@ -1,0 +1,355 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
+"""Governed MLX serve worker (2026-06-28-serve-worker).
+
+Tests the governance logic, gate discipline, and HTTP decision function without loading
+real models or binding sockets. mlx_lm is monkeypatched throughout; no weights downloaded.
+
+    refused: {"refused": true, "reason": "<why>"}        — pre-load gate veto
+    ready:   {"ready": true, "url": "http://127.0.0.1:<PORT>", "context": <ceiling>}
+"""
+from __future__ import annotations
+
+import json
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from wmx_suite import serve
+
+
+# --------------------------------------------------------------------------- #
+# Shared stubs
+# --------------------------------------------------------------------------- #
+
+def _info(weights_gb=0.1, slope=0.01, is_causal=True, can_quant=True, max_ctx=None):
+    return SimpleNamespace(
+        weights_gb=weights_gb,
+        is_causal=is_causal,
+        can_quantize_kv=can_quant,
+        max_context=max_ctx,
+        estimated_slope_gb_per_k=lambda kv_bits=None: slope,
+    )
+
+
+def _limits(wall_gb=40.0, wired_now_gb=8.0):
+    return SimpleNamespace(
+        wall_gb=wall_gb,
+        wired_now_gb=wired_now_gb,
+        safe_threshold_gb=lambda margin: wall_gb - margin,
+    )
+
+
+def _patch_safe_env(monkeypatch):
+    monkeypatch.setattr(serve.system, "read_limits", lambda: _limits())
+    monkeypatch.setattr(serve.system, "sample_settled_baseline", lambda: 8.0)
+
+
+class _FakeTok:
+    """Word-splitting tokenizer stub — no weights, no network.
+
+    apply_chat_template joins all message contents with a space; encode counts words.
+    This makes prompt_tokens predictable from the raw content strings in tests.
+    """
+
+    def apply_chat_template(self, messages, *, tokenize=False, add_generation_prompt=True):
+        return " ".join(m.get("content", "") for m in messages)
+
+    def encode(self, text: str) -> list[int]:
+        return list(range(max(0, len(text.split()))))
+
+
+def _fake_mlx_generate(monkeypatch, completion="reply"):
+    """Patch sys.modules['mlx_lm'] with a generate stub that records call args."""
+    captured: dict = {}
+
+    def fake_generate(model, tok, prompt=None, max_tokens=None, **kw):
+        captured.update(prompt=prompt, max_tokens=max_tokens, kw=kw)
+        return completion
+
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(generate=fake_generate, load=None),
+    )
+    return captured
+
+
+# --------------------------------------------------------------------------- #
+# governed_max_tokens — pure helper, no deps
+# --------------------------------------------------------------------------- #
+
+def test_governed_max_tokens_rejects_when_need_exceeds_ceiling():
+    # 100 prompt + 500 requested = 600 > 512 → None
+    assert serve.governed_max_tokens(100, 500, 512) is None
+
+
+def test_governed_max_tokens_accepts_when_within_ceiling():
+    # 100 + 200 = 300 <= 512 → 200
+    assert serve.governed_max_tokens(100, 200, 512) == 200
+
+
+def test_governed_max_tokens_accepts_exactly_at_boundary():
+    # 100 + 412 = 512 == 512 — need > ceiling is the veto condition, equality passes
+    assert serve.governed_max_tokens(100, 412, 512) == 412
+
+
+def test_governed_max_tokens_rejects_when_prompt_alone_at_ceiling():
+    # prompt_tokens == ceiling → no room for any output → None
+    assert serve.governed_max_tokens(512, 1, 512) is None
+
+
+def test_governed_max_tokens_rejects_when_prompt_exceeds_ceiling():
+    assert serve.governed_max_tokens(600, 1, 512) is None
+
+
+def test_governed_max_tokens_zero_requested_within_ceiling():
+    # requested=0, 5+0=5 <= 100 → accepted (clamp to 0)
+    assert serve.governed_max_tokens(5, 0, 100) == 0
+
+
+# --------------------------------------------------------------------------- #
+# _pre_load_gate — mirrors generate.py's gate discipline
+# --------------------------------------------------------------------------- #
+
+def test_gate_vetoes_unknown_model(monkeypatch):
+    monkeypatch.setattr(serve.models, "describe", lambda hf: None)
+    refusal, kv = serve._pre_load_gate("unknown/model", 4096, margin_gb=4.0, overhead_gb=1.0)
+    assert refusal is not None and refusal["refused"] is True
+    assert "not found" in refusal["reason"]
+    assert kv is None
+
+
+def test_gate_vetoes_noncausal_model(monkeypatch):
+    monkeypatch.setattr(serve.models, "describe", lambda hf: _info(is_causal=False))
+    refusal, _ = serve._pre_load_gate("vision/model", 4096, margin_gb=4.0, overhead_gb=1.0)
+    assert refusal["refused"] is True and "causal" in refusal["reason"]
+
+
+def test_gate_vetoes_when_memory_unsafe(monkeypatch):
+    monkeypatch.setattr(serve.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(serve.measure_one, "safety_gate",
+                        lambda *a, **k: "predicted 99GB >= budget")
+    refusal, _ = serve._pre_load_gate("big/model", 4096, margin_gb=4.0, overhead_gb=1.0)
+    assert refusal["refused"] is True and "predicted 99GB" in refusal["reason"]
+
+
+def test_gate_passes_when_safe_returns_none_refusal(monkeypatch):
+    monkeypatch.setattr(serve.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(serve.measure_one, "safety_gate", lambda *a, **k: None)
+    refusal, effective_kv = serve._pre_load_gate(
+        "safe/model", 4096, margin_gb=4.0, overhead_gb=1.0
+    )
+    assert refusal is None
+    assert effective_kv is None  # no kv_bits requested → fp16 (None)
+
+
+def test_gate_resolves_effective_kv_bits_for_quantizable_model(monkeypatch):
+    monkeypatch.setattr(serve.models, "describe", lambda hf: _info(can_quant=True))
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(serve.measure_one, "safety_gate", lambda *a, **k: None)
+    _, effective_kv = serve._pre_load_gate(
+        "quant/model", 4096, margin_gb=4.0, overhead_gb=1.0, kv_bits=4
+    )
+    assert effective_kv == 4  # quantizable model → kv_bits honoured
+
+
+def test_gate_forces_fp16_for_nonquantizable_model(monkeypatch):
+    monkeypatch.setattr(serve.models, "describe", lambda hf: _info(can_quant=False))
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(serve.measure_one, "safety_gate", lambda *a, **k: None)
+    _, effective_kv = serve._pre_load_gate(
+        "sliding/model", 4096, margin_gb=4.0, overhead_gb=1.0, kv_bits=4
+    )
+    assert effective_kv is None  # RotatingKVCache must run fp16 (Rule #1)
+
+
+# --------------------------------------------------------------------------- #
+# _handle_completions — pure HTTP decision function, no socket
+# --------------------------------------------------------------------------- #
+
+def test_handle_completions_returns_400_when_need_exceeds_ceiling(monkeypatch):
+    _fake_mlx_generate(monkeypatch)  # must NOT be called
+    # "hello world" → 2 tokens; requested=500 → need=502 > ceiling=400 → 400
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hello world"}], "max_tokens": 500},
+        _FakeTok(), "MODEL", ceiling=400, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 400
+    assert body["error"]["type"] == "context_length_exceeded"
+    assert "400" in body["error"]["message"]   # ceiling in message
+    assert "502" in body["error"]["message"]   # need (2+500) in message
+
+
+def test_handle_completions_returns_200_within_ceiling(monkeypatch):
+    captured = _fake_mlx_generate(monkeypatch, completion="great answer")
+    # "hi" → 1 token; requested=10 → need=11 <= 100 ceiling → accept
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 200
+    assert body["choices"][0]["message"]["content"] == "great answer"
+    assert body["model"] == "some/model"
+    assert captured["max_tokens"] == 10
+
+
+def test_handle_completions_defaults_max_tokens_when_absent(monkeypatch):
+    captured = _fake_mlx_generate(monkeypatch)
+    # No max_tokens → defaults to 512; 1 prompt token + 512 <= 8192 → accepted
+    serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        _FakeTok(), "MODEL", ceiling=8192, kv_bits=None, hf_id="some/model",
+    )
+    assert captured["max_tokens"] == 512
+
+
+def test_handle_completions_passes_exact_allowed_max_tokens_to_generate(monkeypatch):
+    """mlx_lm must receive governed_max_tokens, not the raw requested value."""
+    captured = _fake_mlx_generate(monkeypatch)
+    # "test" → 1 token; requested=99; 1+99=100 == ceiling → accepted; allowed=99
+    serve._handle_completions(
+        {"messages": [{"role": "user", "content": "test"}], "max_tokens": 99},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+    )
+    assert captured["max_tokens"] == 99
+
+
+def test_handle_completions_passes_kv_kwargs_when_quantized(monkeypatch):
+    captured = _fake_mlx_generate(monkeypatch)
+    serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=8192, kv_bits=4, hf_id="some/model",
+    )
+    assert captured["kw"]["kv_bits"] == 4
+    assert captured["kw"]["kv_group_size"] == 64
+    assert captured["kw"]["quantized_kv_start"] == 5000
+
+
+def test_handle_completions_no_kv_kwargs_for_fp16(monkeypatch):
+    captured = _fake_mlx_generate(monkeypatch)
+    serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=8192, kv_bits=None, hf_id="some/model",
+    )
+    assert "kv_bits" not in captured["kw"]
+
+
+def test_handle_completions_rejects_when_prompt_alone_fills_ceiling(monkeypatch):
+    _fake_mlx_generate(monkeypatch)
+    # "a b c" → 3 tokens; ceiling=3 → prompt_tokens >= ceiling → 400
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "a b c"}], "max_tokens": 1},
+        _FakeTok(), "MODEL", ceiling=3, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 400
+    assert body["error"]["type"] == "context_length_exceeded"
+
+
+# --------------------------------------------------------------------------- #
+# serve() — integration: gate veto + ready handshake (no real sockets/weights)
+# --------------------------------------------------------------------------- #
+
+def test_serve_prints_refusal_json_and_exits_1_when_gate_vetoes(monkeypatch, capsys):
+    monkeypatch.setattr(
+        serve, "_pre_load_gate",
+        lambda *a, **k: ({"refused": True, "reason": "too big for budget"}, None),
+    )
+    # If load is reached the test explodes — proving Rule #1 holds
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(
+        load=lambda *a: (_ for _ in ()).throw(AssertionError("weights loaded — gate failed!")),
+    ))
+    with pytest.raises(SystemExit) as exc:
+        serve.serve("big/model", 4096, margin_gb=4.0, overhead_gb=1.0, port=8080)
+    assert exc.value.code == 1
+    out = capsys.readouterr().out.strip()
+    data = json.loads(out)
+    assert data == {"refused": True, "reason": "too big for budget"}
+
+
+def test_serve_prints_ready_json_after_successful_gate_and_load(monkeypatch, capsys):
+    monkeypatch.setattr(serve, "_pre_load_gate", lambda *a, **k: (None, None))
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(load=lambda hf: ("MODEL", _FakeTok())),
+    )
+
+    class _FakeServer:
+        def __init__(self, addr, handler_class): pass
+        def serve_forever(self): pass  # don't block
+
+    monkeypatch.setattr(serve, "HTTPServer", _FakeServer)
+
+    serve.serve("safe/model", 4096, margin_gb=4.0, overhead_gb=1.0, port=9001)
+    out = capsys.readouterr().out.strip()
+    data = json.loads(out)
+    assert data == {"ready": True, "url": "http://127.0.0.1:9001", "context": 4096}
+
+
+def test_serve_ready_json_reflects_port_and_context(monkeypatch, capsys):
+    monkeypatch.setattr(serve, "_pre_load_gate", lambda *a, **k: (None, None))
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(load=lambda hf: ("MODEL", _FakeTok())),
+    )
+
+    class _FakeServer:
+        def __init__(self, addr, handler_class): pass
+        def serve_forever(self): pass
+
+    monkeypatch.setattr(serve, "HTTPServer", _FakeServer)
+
+    serve.serve("safe/model", 8192, margin_gb=4.0, overhead_gb=1.0, port=11434)
+    out = capsys.readouterr().out.strip()
+    data = json.loads(out)
+    assert data["url"] == "http://127.0.0.1:11434"
+    assert data["context"] == 8192
+
+
+def test_serve_calls_serve_forever(monkeypatch):
+    """serve() must reach serve_forever() — not return early after printing ready."""
+    monkeypatch.setattr(serve, "_pre_load_gate", lambda *a, **k: (None, None))
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(load=lambda hf: ("MODEL", _FakeTok())),
+    )
+
+    served = []
+
+    class _FakeServer:
+        def __init__(self, addr, handler_class): pass
+        def serve_forever(self): served.append(True)
+
+    monkeypatch.setattr(serve, "HTTPServer", _FakeServer)
+
+    serve.serve("safe/model", 4096, margin_gb=4.0, overhead_gb=1.0, port=9000)
+    assert served, "serve_forever was never called"
+
+
+# --------------------------------------------------------------------------- #
+# main() — CLI argument parsing wires through to serve()
+# --------------------------------------------------------------------------- #
+
+def test_main_threads_args_to_serve(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(
+        serve, "serve",
+        lambda hf, ctx, *, margin_gb, overhead_gb, port, kv_bits=None:
+        seen.update(hf=hf, ctx=ctx, margin_gb=margin_gb,
+                    overhead_gb=overhead_gb, port=port, kv_bits=kv_bits),
+    )
+    serve.main(["my/model", "4096", "--margin", "4", "--overhead", "1", "--port", "8080"])
+    assert seen == {
+        "hf": "my/model", "ctx": 4096, "margin_gb": 4.0,
+        "overhead_gb": 1.0, "port": 8080, "kv_bits": None,
+    }
+
+
+def test_main_threads_kv_bits_to_serve(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(serve, "serve", lambda *a, **k: seen.update(k))
+    serve.main(["my/model", "4096", "--margin", "4", "--overhead", "1",
+                "--port", "8080", "--kv-bits", "8"])
+    assert seen["kv_bits"] == 8

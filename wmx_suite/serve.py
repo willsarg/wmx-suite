@@ -1,0 +1,248 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Will Sarg
+"""Governed OpenAI-compatible HTTP endpoint for MLX inference — the engine-side serve verb.
+
+Same Safety-first (Rule #1) discipline as ``generate``: the safety gate runs *before* any
+weight load. A vetoed model prints one JSON refusal to stdout and exits 1 immediately. Only
+a safe (model, context) pair reaches mlx_lm. After binding, a single ready-handshake JSON
+line is flushed to stdout (the IPC signal for ARA). All logging goes to **stderr**; stdout
+carries only the handshake or refusal JSON.
+
+Per-request governance enforces the context ceiling for every call: no single request can
+exceed it, regardless of what the caller requests. Prompt tokens are counted with the loaded
+tokenizer (no weights re-accessed). The ceiling is a HARD cap — requests that need more are
+refused with HTTP 400 before generation starts.
+
+    refused: {"refused": true, "reason": "<why>"}
+    ready:   {"ready": true, "url": "http://127.0.0.1:<PORT>", "context": <ceiling>}
+
+Usage:
+    python -m wmx_suite.serve <hf_id> <ctx_ceiling> --margin G --overhead G --port N [--kv-bits N]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from . import measure_one, models, system
+
+log = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Pure governance helpers — unit-testable without weights or sockets
+# --------------------------------------------------------------------------- #
+
+def governed_max_tokens(prompt_tokens: int, requested_max_tokens: int,
+                        ceiling: int) -> int | None:
+    """Return the allowed max_tokens, or None if the request must be rejected.
+
+    None is returned when the prompt alone fills the ceiling (``prompt_tokens >= ceiling``)
+    or when ``prompt_tokens + requested_max_tokens > ceiling``. Otherwise returns
+    ``min(requested_max_tokens, ceiling - prompt_tokens)``, which equals
+    ``requested_max_tokens`` in the acceptance branch — the clamp is a conservative
+    safety belt for callers that compute their own budget.
+    """
+    if prompt_tokens >= ceiling:
+        return None
+    if prompt_tokens + requested_max_tokens > ceiling:
+        return None
+    return min(requested_max_tokens, ceiling - prompt_tokens)
+
+
+# --------------------------------------------------------------------------- #
+# Pre-load gate — mirrors generate.py (Rule #1: never load if gate fails)
+# --------------------------------------------------------------------------- #
+
+def _pre_load_gate(hf_id: str, ceiling: int, *, margin_gb: float, overhead_gb: float,
+                   kv_bits: int | None = None) -> tuple[dict | None, int | None]:
+    """Validate model + run memory gate before any weight load.
+
+    Returns ``(refusal_dict, None)`` on any failure; ``(None, effective_kv_bits)`` when safe.
+    ``effective_kv_bits`` reflects :func:`measure_one._effective_kv_bits` — fp16 (None) for
+    non-quantizable (RotatingKVCache) models regardless of what the caller passed.
+    """
+    info = models.describe(hf_id)
+    if info is None:
+        return ({"refused": True, "reason": f"model not found in HF cache: {hf_id}"}, None)
+    if not info.is_causal:
+        return ({"refused": True,
+                 "reason": f"{hf_id} is not a supported causal language model"}, None)
+
+    effective_kv = measure_one._effective_kv_bits(info, kv_bits)
+    limits = system.read_limits()
+    live_base = system.sample_settled_baseline()
+    reason = measure_one.safety_gate(info, limits, ceiling, margin_gb=margin_gb,
+                                     overhead_gb=overhead_gb, live_base=live_base,
+                                     kv_bits=effective_kv)
+    if reason is not None:
+        return ({"refused": True, "reason": reason}, None)
+    return (None, effective_kv)
+
+
+# --------------------------------------------------------------------------- #
+# Per-request decision — pure function, no HTTP plumbing
+# --------------------------------------------------------------------------- #
+
+def _render_messages(tokenizer, messages: list[dict]) -> str:
+    """Render chat messages to a single prompt string via the tokenizer's chat template.
+
+    Falls back to a plain ``role: content`` join for tokenizers without a template.
+    """
+    try:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+    except Exception:
+        return "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages
+        )
+
+
+def _handle_completions(body: dict, tokenizer, model, ceiling: int,
+                        kv_bits: int | None, hf_id: str) -> tuple[int, dict]:
+    """Pure request-decision function — no HTTP plumbing, fully unit-testable.
+
+    Tokenizes the rendered prompt (tokenizer only, no weights), applies governance, then
+    either returns ``(400, error_body)`` or generates and returns ``(200, completion_body)``.
+    The error body follows the OpenAI error envelope; the success body is a minimal
+    OpenAI-compatible chat completion object.
+    """
+    messages = body.get("messages", [])
+    requested_max = int(body.get("max_tokens", 512))
+
+    prompt = _render_messages(tokenizer, messages)
+    prompt_tokens = len(tokenizer.encode(prompt))
+
+    allowed = governed_max_tokens(prompt_tokens, requested_max, ceiling)
+    if allowed is None:
+        need = prompt_tokens + requested_max
+        return (400, {
+            "error": {
+                "message": (f"request exceeds governed context ceiling {ceiling} "
+                            f"(needed {need})"),
+                "type": "context_length_exceeded",
+            }
+        })
+
+    # Lazy import so the module loads without mlx installed and tests can monkeypatch.
+    from mlx_lm import generate as mlx_generate  # type: ignore[import]
+
+    kv_kwargs = ({} if kv_bits is None
+                 else {"kv_bits": kv_bits, "kv_group_size": 64, "quantized_kv_start": 5000})
+    text = mlx_generate(model, tokenizer, prompt=prompt, max_tokens=allowed, **kv_kwargs)
+
+    return (200, {
+        "object": "chat.completion",
+        "model": hf_id,
+        "choices": [
+            {"index": 0,
+             "message": {"role": "assistant", "content": text},
+             "finish_reason": "stop"},
+        ],
+    })
+
+
+# --------------------------------------------------------------------------- #
+# HTTP handler factory
+# --------------------------------------------------------------------------- #
+
+def _make_handler(model, tokenizer, ceiling: int, kv_bits: int | None, hf_id: str):
+    """Return a BaseHTTPRequestHandler subclass closed over the loaded model + config."""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):  # noqa: N802
+            log.debug(fmt, *args)
+
+        def do_POST(self):  # noqa: N802
+            if self.path != "/v1/chat/completions":
+                self._json(404, {"error": {"message": f"not found: {self.path}",
+                                           "type": "not_found"}})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length))
+            except Exception as exc:
+                self._json(400, {"error": {"message": str(exc),
+                                           "type": "invalid_request_error"}})
+                return
+            status, resp = _handle_completions(body, tokenizer, model, ceiling, kv_bits, hf_id)
+            self._json(status, resp)
+
+        def _json(self, status: int, body: dict) -> None:
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    return _Handler
+
+
+# --------------------------------------------------------------------------- #
+# Server entry-point
+# --------------------------------------------------------------------------- #
+
+def serve(hf_id: str, ceiling: int, *, margin_gb: float, overhead_gb: float,
+          port: int, kv_bits: int | None = None) -> None:
+    """Gate, load, bind, handshake, serve. Exits 1 (never returns normally) on veto.
+
+    Sequence:
+    1. Safety gate BEFORE loading weights (Rule #1). Veto → stdout refusal + exit 1.
+    2. ``mlx_lm.load(hf_id)`` — only reached when the gate passes.
+    3. Bind a single-threaded ``HTTPServer`` on ``127.0.0.1:<port>``.
+    4. Print ready-handshake JSON to stdout and flush (ARA blocks on this line).
+    5. ``serve_forever()`` — runs until the process is killed.
+    """
+    refusal, effective_kv = _pre_load_gate(hf_id, ceiling, margin_gb=margin_gb,
+                                           overhead_gb=overhead_gb, kv_bits=kv_bits)
+    if refusal is not None:
+        print(json.dumps({"refused": True, "reason": refusal["reason"]}), flush=True)
+        sys.exit(1)
+
+    # Lazy import — preserves refuse-before-load (Rule #1) and allows test monkeypatching.
+    from mlx_lm import load  # type: ignore[import]
+
+    model, tokenizer = load(hf_id)
+
+    handler_class = _make_handler(model, tokenizer, ceiling, effective_kv, hf_id)
+    # Single-threaded on purpose: MLX's GPU stream is thread-local, so generation must run on the
+    # same thread that loaded the model. Requests serialize — correct for a local one-model endpoint.
+    server = HTTPServer(("127.0.0.1", port), handler_class)
+
+    # IPC ready handshake — ARA blocks waiting for this exact line on stdout.
+    print(json.dumps({"ready": True, "url": f"http://127.0.0.1:{port}",
+                      "context": ceiling}), flush=True)
+
+    server.serve_forever()
+
+
+# --------------------------------------------------------------------------- #
+# CLI entry-point
+# --------------------------------------------------------------------------- #
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(
+        description="Governed OpenAI-compatible MLX endpoint."
+    )
+    ap.add_argument("hf_id")
+    ap.add_argument("ctx_ceiling", type=int)
+    ap.add_argument("--margin", type=float, required=True)
+    ap.add_argument("--overhead", type=float, required=True)
+    ap.add_argument("--port", type=int, required=True)
+    ap.add_argument(
+        "--kv-bits", type=int, default=None,
+        help="KV-cache quantization bits (8 or 4); omit for fp16. "
+             "Ignored for non-quantizable (RotatingKVCache) models.",
+    )
+    args = ap.parse_args(argv)
+    serve(args.hf_id, args.ctx_ceiling, margin_gb=args.margin, overhead_gb=args.overhead,
+          port=args.port, kv_bits=args.kv_bits)
+
+
+if __name__ == "__main__":
+    main()
