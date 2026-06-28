@@ -2,14 +2,16 @@
 # Copyright 2026 Will Sarg
 """Governed MLX serve worker (2026-06-28-serve-worker).
 
-Tests the governance logic, gate discipline, and HTTP decision function without loading
-real models or binding sockets. mlx_lm is monkeypatched throughout; no weights downloaded.
+Tests the governance logic, gate discipline, HTTP decision function, SSE streaming,
+and OpenAI tool-calling — without loading real models or binding sockets. mlx_lm is
+monkeypatched throughout; no weights downloaded.
 
     refused: {"refused": true, "reason": "<why>"}        — pre-load gate veto
     ready:   {"ready": true, "url": "http://127.0.0.1:<PORT>", "context": <ceiling>}
 """
 from __future__ import annotations
 
+import io
 import json
 import sys
 from types import SimpleNamespace
@@ -60,6 +62,21 @@ class _FakeTok:
         return list(range(max(0, len(text.split()))))
 
 
+class _ToolTok(_FakeTok):
+    """Tokenizer stub that advertises tool-calling capability."""
+
+    has_tool_calling = True
+    tool_call_start = "<tool_call>"
+    tool_call_end = "</tool_call>"
+
+    def apply_chat_template(self, messages, *, tokenize=False, add_generation_prompt=True,
+                             tools=None):
+        return " ".join(m.get("content", "") for m in messages)
+
+    def tool_parser(self, text, tools):  # noqa: ARG002
+        return {"name": "f", "arguments": {"x": 1}}
+
+
 def _fake_mlx_generate(monkeypatch, completion="reply"):
     """Patch sys.modules['mlx_lm'] with a generate stub that records call args."""
     captured: dict = {}
@@ -73,6 +90,49 @@ def _fake_mlx_generate(monkeypatch, completion="reply"):
         SimpleNamespace(generate=fake_generate, load=None),
     )
     return captured
+
+
+# --------------------------------------------------------------------------- #
+# Streaming stubs
+# --------------------------------------------------------------------------- #
+
+class _FakeStreamResponse:
+    """Minimal stand-in for mlx_lm.GenerationResponse."""
+
+    def __init__(self, text: str, finish_reason=None):
+        self.text = text
+        self.finish_reason = finish_reason
+
+
+class _FakeHandler:
+    """Fake BaseHTTPRequestHandler that captures SSE writes without a real socket."""
+
+    def __init__(self):
+        self.wfile = io.BytesIO()
+        self._response_code = None
+        self._headers: dict[str, str] = {}
+        self._end_headers_called = False
+
+    def send_response(self, code: int) -> None:
+        self._response_code = code
+
+    def send_header(self, key: str, value: str) -> None:
+        self._headers[key] = value
+
+    def end_headers(self) -> None:
+        self._end_headers_called = True
+
+
+def _fake_mlx_stream_generate(monkeypatch, responses):
+    """Patch sys.modules['mlx_lm'] with a stream_generate stub."""
+
+    def fake_stream_generate(model, tok, prompt, max_tokens=None, **kw):
+        yield from responses
+
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(stream_generate=fake_stream_generate, generate=None, load=None),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -246,6 +306,217 @@ def test_handle_completions_rejects_when_prompt_alone_fills_ceiling(monkeypatch)
     )
     assert status == 400
     assert body["error"]["type"] == "context_length_exceeded"
+
+
+# --------------------------------------------------------------------------- #
+# _handle_completions — tool-calling
+# --------------------------------------------------------------------------- #
+
+def test_handle_completions_returns_tool_calls_when_marker_present(monkeypatch):
+    """When the model emits tool markers, the response uses the tool_calls shape."""
+    tool_text = "<tool_call>some args</tool_call>"
+    _fake_mlx_generate(monkeypatch, completion=tool_text)
+
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "tools": tools},
+        _ToolTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 200
+    assert body["object"] == "chat.completion"
+    choices = body["choices"]
+    assert len(choices) == 1
+    assert choices[0]["finish_reason"] == "tool_calls"
+    msg = choices[0]["message"]
+    assert msg["role"] == "assistant"
+    assert msg["content"] is None
+    assert len(msg["tool_calls"]) == 1
+    tc = msg["tool_calls"][0]
+    assert tc["type"] == "function"
+    assert tc["id"].startswith("call_")
+    assert tc["function"]["name"] == "f"
+    assert json.loads(tc["function"]["arguments"]) == {"x": 1}
+
+
+def test_handle_completions_plain_text_when_no_tool_marker(monkeypatch):
+    """Without a tool marker in the output, response is a normal text completion."""
+    _fake_mlx_generate(monkeypatch, completion="plain answer")
+
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "tools": tools},
+        _ToolTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 200
+    assert body["choices"][0]["message"]["content"] == "plain answer"
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_handle_completions_plain_text_when_no_tools_provided(monkeypatch):
+    """Without tools in the request, tool-calling path is never entered."""
+    _fake_mlx_generate(monkeypatch, completion="answer")
+
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _ToolTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 200
+    assert body["choices"][0]["message"]["content"] == "answer"
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+def test_handle_completions_plain_text_when_tokenizer_lacks_tool_calling(monkeypatch):
+    """_FakeTok has no has_tool_calling — tool markers in output are treated as plain text."""
+    tool_text = "<tool_call>args</tool_call>"
+    _fake_mlx_generate(monkeypatch, completion=tool_text)
+
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "tools": tools},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+    )
+    assert status == 200
+    assert body["choices"][0]["message"]["content"] == tool_text
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+# --------------------------------------------------------------------------- #
+# _stream_completions — SSE streaming
+# --------------------------------------------------------------------------- #
+
+def test_stream_completions_yields_delta_chunks_and_done(monkeypatch):
+    """Happy path: each non-final response emits a data: chunk; [DONE] closes the stream."""
+    responses = [
+        _FakeStreamResponse("Hello", None),
+        _FakeStreamResponse(" world", None),
+        _FakeStreamResponse("", "stop"),
+    ]
+    _fake_mlx_stream_generate(monkeypatch, responses)
+
+    handler = _FakeHandler()
+    result = serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+        handler=handler,
+    )
+
+    assert result is None  # streaming started — no error tuple returned
+    assert handler._response_code == 200
+    assert handler._headers["Content-Type"] == "text/event-stream"
+    assert handler._headers["Cache-Control"] == "no-cache"
+    assert handler._end_headers_called
+
+    output = handler.wfile.getvalue().decode()
+    data_lines = [ln for ln in output.split("\n") if ln.startswith("data:")]
+
+    # Content chunks
+    content_lines = [ln for ln in data_lines if ln != "data: [DONE]"]
+    contents = []
+    for ln in content_lines:
+        chunk = json.loads(ln[len("data: "):])
+        delta = chunk["choices"][0]["delta"]
+        if "content" in delta:
+            contents.append(delta["content"])
+
+    assert "Hello" in contents
+    assert " world" in contents
+
+    # Final chunk: delta={}, finish_reason set
+    final_chunk = json.loads(content_lines[-1][len("data: "):])
+    assert final_chunk["choices"][0]["delta"] == {}
+    assert final_chunk["choices"][0]["finish_reason"] == "stop"
+
+    # Sentinel
+    assert "data: [DONE]" in data_lines
+
+
+def test_stream_completions_finish_reason_propagated(monkeypatch):
+    """finish_reason from the last GenerationResponse reaches the final SSE chunk."""
+    responses = [
+        _FakeStreamResponse("tok", None),
+        _FakeStreamResponse("", "length"),
+    ]
+    _fake_mlx_stream_generate(monkeypatch, responses)
+
+    handler = _FakeHandler()
+    serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="some/model",
+        handler=handler,
+    )
+
+    output = handler.wfile.getvalue().decode()
+    data_lines = [ln for ln in output.split("\n")
+                  if ln.startswith("data:") and ln != "data: [DONE]"]
+    final_chunk = json.loads(data_lines[-1][len("data: "):])
+    assert final_chunk["choices"][0]["finish_reason"] == "length"
+
+
+def test_stream_completions_governance_reject_returns_error_tuple(monkeypatch):
+    """When governance fails, return (400, error) and write NO SSE at all."""
+    _fake_mlx_stream_generate(monkeypatch, [])  # must not be called
+
+    handler = _FakeHandler()
+    # "hello world" → 2 tokens; requested=500 → need=502 > ceiling=400
+    result = serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hello world"}], "max_tokens": 500},
+        _FakeTok(), "MODEL", ceiling=400, kv_bits=None, hf_id="some/model",
+        handler=handler,
+    )
+
+    assert result is not None
+    status, err = result
+    assert status == 400
+    assert err["error"]["type"] == "context_length_exceeded"
+    # No SSE headers or body were written
+    assert handler._response_code is None
+    assert handler.wfile.getvalue() == b""
+
+
+def test_stream_completions_passes_kv_kwargs(monkeypatch):
+    """KV-quantization kwargs are forwarded to stream_generate."""
+    received: dict = {}
+
+    def fake_stream_generate(model, tok, prompt, max_tokens=None, **kw):
+        received.update(kw)
+        yield _FakeStreamResponse("ok", "stop")
+
+    monkeypatch.setitem(
+        sys.modules, "mlx_lm",
+        SimpleNamespace(stream_generate=fake_stream_generate, generate=None, load=None),
+    )
+
+    handler = _FakeHandler()
+    serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=4, hf_id="some/model",
+        handler=handler,
+    )
+
+    assert received["kv_bits"] == 4
+    assert received["kv_group_size"] == 64
+    assert received["quantized_kv_start"] == 5000
+
+
+def test_stream_completions_model_id_in_chunks(monkeypatch):
+    """Every SSE chunk carries the hf_id as the model field."""
+    _fake_mlx_stream_generate(monkeypatch, [
+        _FakeStreamResponse("x", None),
+        _FakeStreamResponse("", "stop"),
+    ])
+
+    handler = _FakeHandler()
+    serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="org/my-model",
+        handler=handler,
+    )
+
+    output = handler.wfile.getvalue().decode()
+    for ln in output.split("\n"):
+        if ln.startswith("data:") and ln != "data: [DONE]":
+            chunk = json.loads(ln[len("data: "):])
+            assert chunk["model"] == "org/my-model"
 
 
 # --------------------------------------------------------------------------- #
