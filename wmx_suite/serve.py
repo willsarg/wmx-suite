@@ -400,7 +400,14 @@ def serve(hf_id: str, ceiling: int, *, margin_gb: float, overhead_gb: float,
     # Lazy import — preserves refuse-before-load (Rule #1) and allows test monkeypatching.
     from mlx_lm import load  # type: ignore[import]
 
-    model, tokenizer = load(hf_id)
+    try:
+        model, tokenizer = load(hf_id)
+    except Exception as exc:
+        first = str(exc).splitlines()[0][:200] if str(exc) else ""
+        print(json.dumps({"refused": True,
+                          "reason": f"failed to load {hf_id}: {type(exc).__name__}: {first}"}),
+              flush=True)
+        sys.exit(1)
 
     handler_class = _make_handler(model, tokenizer, ceiling, effective_kv, hf_id)
     # Single-threaded on purpose: MLX's GPU stream is thread-local, so generation must run on the

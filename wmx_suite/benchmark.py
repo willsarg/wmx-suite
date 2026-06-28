@@ -80,7 +80,12 @@ def benchmark(hf_id: str, ceiling: int, *, prompts: list[str], margin_gb: float,
     # Lazy import — preserves refuse-before-load (Rule #1) and allows test monkeypatching.
     from mlx_lm import generate as mlx_generate, load  # type: ignore[import]
 
-    model, tokenizer = load(hf_id)
+    try:
+        model, tokenizer = load(hf_id)
+    except Exception as exc:
+        first = str(exc).splitlines()[0][:200] if str(exc) else ""
+        return {"context": ceiling, "refused": True,
+                "reason": f"failed to load {hf_id}: {type(exc).__name__}: {first}"}
     results = _run_prompts(prompts, tokenizer, max_tokens=max_tokens, ceiling=ceiling,
                            effective_kv=effective_kv, mlx_generate=mlx_generate, model=model)
     return {"context": ceiling, "results": results}
@@ -102,9 +107,10 @@ def main(argv=None) -> None:
     result = benchmark(args.hf_id, args.ctx_ceiling, prompts=prompts,
                        margin_gb=args.margin, overhead_gb=args.overhead,
                        max_tokens=args.max_tokens, kv_bits=args.kv_bits)
+    # A structured refusal (gate veto or load failure) is a valid result, NOT a crash — exit 0 so
+    # run_worker returns the dict and ARA renders the reason cleanly (a non-zero exit would make
+    # run_worker raise with stderr instead, losing the reason).
     print(json.dumps(result), flush=True)
-    if result.get("refused"):
-        sys.exit(1)
 
 
 if __name__ == "__main__":

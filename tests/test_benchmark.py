@@ -245,15 +245,14 @@ def test_main_reads_prompts_from_stdin_and_prints_json(monkeypatch, capsys):
     }
 
 
-def test_main_exits_1_and_prints_refusal_on_gate_veto(monkeypatch, capsys):
+def test_main_prints_refusal_and_exits_0_on_gate_veto(monkeypatch, capsys):
+    # A structured refusal exits 0 (not a crash) so run_worker returns the dict + ARA renders it.
     monkeypatch.setattr(
         benchmark, "benchmark",
         lambda *a, **k: {"context": 4096, "refused": True, "reason": "too big"},
     )
     monkeypatch.setattr("sys.stdin", io.StringIO("[]"))
-    with pytest.raises(SystemExit) as exc:
-        benchmark.main(["big/model", "4096", "--margin", "4", "--overhead", "1"])
-    assert exc.value.code == 1
+    benchmark.main(["big/model", "4096", "--margin", "4", "--overhead", "1"])  # no SystemExit
     out = capsys.readouterr().out.strip()
     assert json.loads(out) == {"context": 4096, "refused": True, "reason": "too big"}
 
@@ -313,3 +312,39 @@ def test_run_prompts_continues_after_per_prompt_exception():
     assert "error" in results[1]
     assert "OOM on prompt" in results[1]["error"]
     assert results[2] == {"prompt_index": 2, "completion": "ok: good two"}
+
+
+# --------------------------------------------------------------------------- #
+# Fix: load() failure → refused dict, no traceback (honesty Rule #3)
+# --------------------------------------------------------------------------- #
+
+def test_benchmark_load_failure_returns_refused_dict(monkeypatch):
+    """load() raises → refused dict with structured reason; process doesn't crash."""
+    monkeypatch.setattr(benchmark, "_pre_load_gate", lambda *a, **k: (None, None))
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(
+        load=lambda hf_id: (_ for _ in ()).throw(
+            RuntimeError("model too new for mlx_lm\nextra traceback detail")),
+        generate=lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not reach")),
+    ))
+    out = benchmark.benchmark("mlx-community/new-model", 4096, prompts=["hi"],
+                              margin_gb=4.0, overhead_gb=1.0)
+    assert out["context"] == 4096
+    assert out["refused"] is True
+    assert "failed to load mlx-community/new-model" in out["reason"]
+    assert "RuntimeError" in out["reason"]
+    # only the first line of the exception message — no multiline traceback
+    assert "model too new for mlx_lm" in out["reason"]
+    assert "extra traceback detail" not in out["reason"]
+
+
+def test_benchmark_main_load_failure_exits_1_with_refused_json(monkeypatch, capsys):
+    """main() emits a load-failure refused dict and exits 0 (run_worker returns it; no traceback)."""
+    import io
+    monkeypatch.setattr(benchmark, "benchmark",
+                        lambda *a, **k: {"context": 4096, "refused": True,
+                                         "reason": "failed to load org/m: RuntimeError: too new"})
+    monkeypatch.setattr("sys.stdin", io.StringIO("[]"))
+    benchmark.main(["org/m", "4096", "--margin", "4", "--overhead", "1"])  # no SystemExit
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["refused"] is True
+    assert "failed to load" in payload["reason"]

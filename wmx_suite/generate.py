@@ -92,7 +92,11 @@ def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
     # Match production quant knobs when quantizing; pass nothing for fp16 (mlx_lm default).
     kv_kwargs = ({} if kv_bits is None
                  else {"kv_bits": kv_bits, "kv_group_size": 64, "quantized_kv_start": 5000})
-    model, tok = load(hf_id)
+    try:
+        model, tok = load(hf_id)
+    except Exception as exc:
+        first = str(exc).splitlines()[0][:200] if str(exc) else ""
+        return _refused(ctx, f"failed to load {hf_id}: {type(exc).__name__}: {first}")
     text = mlx_generate(model, tok, prompt=prompt, max_tokens=max_tokens, **kv_kwargs)
     return {"context": ctx, "completion": text}
 

@@ -947,3 +947,28 @@ def test_do_post_returns_400_for_negative_content_length(monkeypatch):
     assert status == 400
     resp = json.loads(raw)
     assert resp["error"]["type"] == "invalid_request_error"
+
+
+# --------------------------------------------------------------------------- #
+# Fix: load() failure → refused JSON on stdout + exit 1 (honesty Rule #3)
+# --------------------------------------------------------------------------- #
+
+def test_serve_load_failure_prints_refused_json_and_exits_1(monkeypatch, capsys):
+    """load() raises → refused JSON to stdout and exit 1 — no raw traceback."""
+    import sys
+    monkeypatch.setattr(serve, "_pre_load_gate", lambda *a, **k: (None, None))
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(
+        load=lambda hf_id: (_ for _ in ()).throw(
+            RuntimeError("model too new for mlx_lm\nextra detail")),
+        generate=None, stream_generate=None,
+    ))
+    with pytest.raises(SystemExit) as exc:
+        serve.serve("org/new-model", 4096, margin_gb=4.0, overhead_gb=1.0, port=9999)
+    assert exc.value.code == 1
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert payload["refused"] is True
+    assert "failed to load org/new-model" in payload["reason"]
+    assert "RuntimeError" in payload["reason"]
+    assert "model too new for mlx_lm" in payload["reason"]
+    assert "extra detail" not in payload["reason"]   # first line only, no multiline spill
