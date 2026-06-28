@@ -120,7 +120,15 @@ def _handle_completions(body: dict, tokenizer, model, ceiling: int,
     response (``finish_reason: "tool_calls"``) is returned if the model emits tool markers.
     """
     messages = body.get("messages", [])
-    requested_max = int(body.get("max_tokens", 512))
+    _raw_max = body.get("max_tokens", 512)
+    if not isinstance(_raw_max, int) or isinstance(_raw_max, bool):
+        return (400, {
+            "error": {
+                "message": "max_tokens must be a positive integer",
+                "type": "invalid_request_error",
+            }
+        })
+    requested_max = _raw_max
     if requested_max <= 0:
         return (400, {
             "error": {
@@ -214,7 +222,15 @@ def _stream_completions(body: dict, tokenizer, model, ceiling: int,
     caller must not call ``_json`` in that case.
     """
     messages = body.get("messages", [])
-    requested_max = int(body.get("max_tokens", 512))
+    _raw_max = body.get("max_tokens", 512)
+    if not isinstance(_raw_max, int) or isinstance(_raw_max, bool):
+        return (400, {
+            "error": {
+                "message": "max_tokens must be a positive integer",
+                "type": "invalid_request_error",
+            }
+        })
+    requested_max = _raw_max
     if requested_max <= 0:
         return (400, {
             "error": {
@@ -319,6 +335,10 @@ def _make_handler(model, tokenizer, ceiling: int, kv_bits: int | None, hf_id: st
                                            "type": "not_found"}})
                 return
             length = int(self.headers.get("Content-Length", 0))
+            if length < 0:
+                self._json(400, {"error": {"message": "invalid Content-Length",
+                                           "type": "invalid_request_error"}})
+                return
             if length > 1_048_576:
                 self._json(413, {"error": {"message": "request body too large",
                                            "type": "invalid_request_error"}})

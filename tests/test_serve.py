@@ -860,3 +860,90 @@ def test_handle_completions_unterminated_tool_marker_falls_through_to_text(monke
     assert status == 200
     assert body["choices"][0]["message"]["content"] == text
     assert body["choices"][0]["finish_reason"] == "stop"
+
+
+# --------------------------------------------------------------------------- #
+# Bug fix: max_tokens null / non-integer → 400 (not TypeError crash)
+# --------------------------------------------------------------------------- #
+
+def test_handle_completions_rejects_null_max_tokens(monkeypatch):
+    """`"max_tokens": null` must return 400, not raise TypeError."""
+    _fake_mlx_generate(monkeypatch)  # must NOT be called
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": None},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+    )
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert "max_tokens" in body["error"]["message"]
+
+
+def test_handle_completions_rejects_string_max_tokens(monkeypatch):
+    """`"max_tokens": "x"` (non-numeric string) must return 400, not raise TypeError."""
+    _fake_mlx_generate(monkeypatch)  # must NOT be called
+    status, body = serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": "x"},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+    )
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert "max_tokens" in body["error"]["message"]
+
+
+def test_handle_completions_absent_max_tokens_defaults_to_512(monkeypatch):
+    """Absent key (not null) must still default to 512 — regression guard."""
+    captured = _fake_mlx_generate(monkeypatch)
+    serve._handle_completions(
+        {"messages": [{"role": "user", "content": "hi"}]},
+        _FakeTok(), "MODEL", ceiling=8192, kv_bits=None, hf_id="test/model",
+    )
+    assert captured["max_tokens"] == 512
+
+
+def test_stream_completions_rejects_null_max_tokens(monkeypatch):
+    """`"max_tokens": null` on the streaming path must return (400, error), no SSE written."""
+    _fake_mlx_stream_generate(monkeypatch, [])  # must NOT be called
+    handler = _FakeHandler()
+    result = serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": None},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+        handler=handler,
+    )
+    assert result is not None
+    status, body = result
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert "max_tokens" in body["error"]["message"]
+    assert handler._response_code is None  # no SSE headers written
+
+
+def test_stream_completions_rejects_string_max_tokens(monkeypatch):
+    """`"max_tokens": "x"` on the streaming path must return (400, error)."""
+    _fake_mlx_stream_generate(monkeypatch, [])  # must NOT be called
+    handler = _FakeHandler()
+    result = serve._stream_completions(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": "x"},
+        _FakeTok(), "MODEL", ceiling=100, kv_bits=None, hf_id="test/model",
+        handler=handler,
+    )
+    assert result is not None
+    status, body = result
+    assert status == 400
+    assert body["error"]["type"] == "invalid_request_error"
+    assert handler._response_code is None  # no SSE headers written
+
+
+# --------------------------------------------------------------------------- #
+# Bug fix: negative Content-Length → 400 (not read(-1) hang)
+# --------------------------------------------------------------------------- #
+
+def test_do_post_returns_400_for_negative_content_length(monkeypatch):
+    """`Content-Length: -1` must be rejected with 400 before any body read."""
+    _fake_mlx_generate(monkeypatch)
+    status, raw = _run_do_post(
+        monkeypatch, b"ignored",
+        content_length=-1,
+    )
+    assert status == 400
+    resp = json.loads(raw)
+    assert resp["error"]["type"] == "invalid_request_error"
