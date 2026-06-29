@@ -334,7 +334,12 @@ def _make_handler(model, tokenizer, ceiling: int, kv_bits: int | None, hf_id: st
                 self._json(404, {"error": {"message": f"not found: {self.path}",
                                            "type": "not_found"}})
                 return
-            length = int(self.headers.get("Content-Length", 0))
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                self._json(400, {"error": {"message": "invalid Content-Length",
+                                           "type": "invalid_request_error"}})
+                return
             if length < 0:
                 self._json(400, {"error": {"message": "invalid Content-Length",
                                            "type": "invalid_request_error"}})
