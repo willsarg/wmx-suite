@@ -337,6 +337,105 @@ def test_benchmark_load_failure_returns_refused_dict(monkeypatch):
     assert "extra traceback detail" not in out["reason"]
 
 
+# --------------------------------------------------------------------------- #
+# Chat-template correctness  (2026-06-29-chat-template-correctness)
+#
+# mlx_lm.generate does NOT apply the chat template — it just tokenizes the raw
+# string.  Instruct models (e.g. gemma-4) need the template; without it they
+# emit empty / garbage output → artifactual ~0 benchmark scores.
+# --------------------------------------------------------------------------- #
+
+def test_run_prompts_applies_chat_template_when_tokenizer_has_one():
+    """Bug: instruct models fed raw prompts emit garbage — the template must be applied.
+
+    When the mlx_lm tokenizer exposes apply_chat_template, _run_prompts must wrap
+    each user prompt as a single user turn and render it through the template before
+    tokenizing and generating.  2026-06-29-chat-template-correctness.
+    """
+    prompts_seen: list[str] = []
+
+    def fake_gen(model, tok, prompt=None, max_tokens=None, **kw):
+        prompts_seen.append(prompt)
+        return "answer"
+
+    class _TemplatedTok:
+        """Fake mlx_lm tokenizer with apply_chat_template."""
+
+        def apply_chat_template(self, messages, *, tokenize=False,
+                                add_generation_prompt=False):
+            content = messages[0]["content"]
+            return f"<|user|>{content}<|end|><|assistant|>"
+
+        def encode(self, text: str) -> list[int]:
+            return list(range(len(text.split())))
+
+    results = benchmark._run_prompts(
+        ["what is 2+2?"],
+        _TemplatedTok(),
+        max_tokens=100,
+        ceiling=512,
+        effective_kv=None,
+        mlx_generate=fake_gen,
+        model="M",
+    )
+
+    assert results[0]["completion"] == "answer"
+    # The key assertion: the templated string, NOT the raw prompt, reaches mlx_generate.
+    assert prompts_seen == ["<|user|>what is 2+2?<|end|><|assistant|>"]
+
+
+def test_run_prompts_falls_back_to_raw_when_no_apply_chat_template():
+    """Base/completion models without apply_chat_template receive the raw prompt unchanged."""
+    prompts_seen: list[str] = []
+
+    def fake_gen(model, tok, prompt=None, max_tokens=None, **kw):
+        prompts_seen.append(prompt)
+        return "ok"
+
+    # _word_tok() has no apply_chat_template — same as the existing stubs in this file.
+    results = benchmark._run_prompts(
+        ["continue: once upon a time"],
+        _word_tok(),
+        max_tokens=100,
+        ceiling=512,
+        effective_kv=None,
+        mlx_generate=fake_gen,
+        model="M",
+    )
+
+    assert results[0]["completion"] == "ok"
+    assert prompts_seen == ["continue: once upon a time"]
+
+
+def test_run_prompts_template_error_falls_back_to_raw():
+    """If apply_chat_template raises, _run_prompts falls back to the raw prompt silently."""
+    prompts_seen: list[str] = []
+
+    def fake_gen(model, tok, prompt=None, max_tokens=None, **kw):
+        prompts_seen.append(prompt)
+        return "ok"
+
+    class _BrokenTemplateTok:
+        def apply_chat_template(self, messages, **kw):
+            raise RuntimeError("broken template")
+
+        def encode(self, text: str) -> list[int]:
+            return list(range(len(text.split())))
+
+    results = benchmark._run_prompts(
+        ["hello there"],
+        _BrokenTemplateTok(),
+        max_tokens=100,
+        ceiling=512,
+        effective_kv=None,
+        mlx_generate=fake_gen,
+        model="M",
+    )
+
+    assert results[0]["completion"] == "ok"
+    assert prompts_seen == ["hello there"]  # fell back to raw
+
+
 def test_benchmark_main_load_failure_exits_1_with_refused_json(monkeypatch, capsys):
     """main() emits a load-failure refused dict and exits 0 (run_worker returns it; no traceback)."""
     import io

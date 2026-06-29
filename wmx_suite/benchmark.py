@@ -49,14 +49,25 @@ def _run_prompts(prompts: list[str], tokenizer, *, max_tokens: int, ceiling: int
                        "quantized_kv_start": 5000})
     results: list[dict] = []
     for i, p in enumerate(prompts):
-        prompt_tokens = len(tokenizer.encode(p))
+        # Apply the chat template when the tokenizer supports it so instruct models
+        # receive the formatted input they need.  Falls back to the raw prompt for
+        # base/completion models or when template application fails.
+        try:
+            rendered = tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}],
+                tokenize=False, add_generation_prompt=True,
+            )
+        except Exception:
+            rendered = p
+        prompt_tokens = len(tokenizer.encode(rendered))
         allowed = governed_max_tokens(prompt_tokens, max_tokens, ceiling)
         if allowed is None:
             results.append({"prompt_index": i, "refused": True,
                             "reason": f"prompt fills context ceiling {ceiling}"})
         else:
             try:
-                text = mlx_generate(model, tokenizer, prompt=p, max_tokens=allowed, **kv_kwargs)
+                text = mlx_generate(model, tokenizer, prompt=rendered,
+                                    max_tokens=allowed, **kv_kwargs)
                 results.append({"prompt_index": i, "completion": text})
             except Exception as exc:
                 results.append({"prompt_index": i, "error": str(exc)})

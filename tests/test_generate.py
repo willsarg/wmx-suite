@@ -255,6 +255,124 @@ def test_generate_empty_prompt_counts_zero_tokens(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Chat-template correctness  (2026-06-29-chat-template-correctness)
+#
+# mlx_lm.generate does NOT apply the chat template — it just tokenizes the raw
+# string.  Instruct models (e.g. gemma-4) need the template; without it they
+# emit empty / garbage output → artifactual ~0 benchmark scores.
+# --------------------------------------------------------------------------- #
+
+def _fake_tokenizer_with_template(monkeypatch, n_tokens=5,
+                                  template_wrap="<|user|>{content}<|end|><|assistant|>"):
+    """Fake transformers.AutoTokenizer that exposes a chat_template and apply_chat_template.
+
+    apply_chat_template wraps the user-turn content with *template_wrap*, so tests
+    can assert the exact rendered string that reaches mlx_generate.
+    """
+    import sys
+
+    class _TemplatedTok:
+        chat_template = "dummy-template"
+
+        def apply_chat_template(self, messages, *, tokenize=False,
+                                add_generation_prompt=False):
+            content = messages[0]["content"]
+            return template_wrap.format(content=content)
+
+        def encode(self, text):
+            return list(range(n_tokens))
+
+    monkeypatch.setitem(
+        sys.modules, "transformers",
+        SimpleNamespace(AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda hf_id: _TemplatedTok()
+        )),
+    )
+
+
+def test_generate_applies_chat_template_when_tokenizer_has_one(monkeypatch):
+    """Bug: instruct models fed a raw prompt emit garbage — the template must be applied.
+
+    mlx_lm.generate does NOT template automatically; the caller must.  When the
+    transformers tokenizer exposes a chat_template, generate() must render the user
+    turn through apply_chat_template before passing to mlx_generate.
+    2026-06-29-chat-template-correctness.
+    """
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(generate.measure_one, "safety_gate", lambda *a, **k: None)
+    _fake_tokenizer_with_template(monkeypatch, n_tokens=8)
+    captured = _fake_mlx(monkeypatch, completion="fine-tuned answer")
+
+    out = generate.generate("instruct/model", 4000, prompt="what is 2+2?",
+                            margin_gb=4.0, overhead_gb=1.0, max_tokens=16)
+
+    assert out == {"context": 4000, "completion": "fine-tuned answer"}
+    # The key assertion: the templated string, NOT the raw prompt, must reach mlx_generate.
+    assert captured["prompt"] == "<|user|>what is 2+2?<|end|><|assistant|>"
+
+
+def test_generate_falls_back_to_raw_prompt_when_no_chat_template(monkeypatch):
+    """Base/completion models without a chat_template must receive the raw prompt unchanged."""
+    monkeypatch.setattr(generate.models, "describe", lambda hf: _info())
+    _patch_safe_env(monkeypatch)
+    monkeypatch.setattr(generate.measure_one, "safety_gate", lambda *a, **k: None)
+    _fake_tokenizer(monkeypatch, n_tokens=5)   # FakeTok has no chat_template
+    captured = _fake_mlx(monkeypatch, completion="raw response")
+
+    generate.generate("base/model", 4000, prompt="continue: the fox",
+                      margin_gb=4.0, overhead_gb=1.0, max_tokens=16)
+
+    assert captured["prompt"] == "continue: the fox"
+
+
+def test_prepare_prompt_applies_template_and_counts_templated_tokens(monkeypatch):
+    """_prepare_prompt must return the templated string and count its tokens."""
+    import sys
+
+    class _TemplatedTok:
+        chat_template = "some-template"
+
+        def apply_chat_template(self, messages, *, tokenize=False,
+                                add_generation_prompt=False):
+            return f"<bos>{messages[0]['content']}<eos>"
+
+        def encode(self, text):
+            # return one token per character so the test can verify the count
+            return list(range(len(text)))
+
+    monkeypatch.setitem(
+        sys.modules, "transformers",
+        SimpleNamespace(AutoTokenizer=SimpleNamespace(
+            from_pretrained=lambda hf_id: _TemplatedTok()
+        )),
+    )
+
+    rendered, count = generate._prepare_prompt("instruct/model", "hi")
+    assert rendered == "<bos>hi<eos>"
+    assert count == len("<bos>hi<eos>")
+
+
+def test_prepare_prompt_returns_raw_and_count_when_no_template(monkeypatch):
+    """When the tokenizer has no chat_template, _prepare_prompt returns the raw prompt."""
+    _fake_tokenizer(monkeypatch, n_tokens=3)  # FakeTok has no chat_template
+
+    rendered, count = generate._prepare_prompt("base/model", "hello world")
+    assert rendered == "hello world"
+    assert count == 3
+
+
+def test_prepare_prompt_returns_empty_and_zero_without_importing_transformers(monkeypatch):
+    """Empty prompt must short-circuit before importing transformers (no weights, no import)."""
+    import sys
+    monkeypatch.setitem(sys.modules, "transformers", None)  # would explode if imported
+
+    rendered, count = generate._prepare_prompt("any/model", "")
+    assert rendered == ""
+    assert count == 0
+
+
+# --------------------------------------------------------------------------- #
 # main() — reads prompt from stdin, prints one JSON line
 # --------------------------------------------------------------------------- #
 def test_main_reads_prompt_from_stdin_prints_one_json_line(monkeypatch, capsys):

@@ -29,20 +29,29 @@ from . import measure_one, models, system
 _refused = measure_one._refused
 
 
-def _count_prompt_tokens(hf_id: str, prompt: str) -> int:
-    """Tokenize *prompt* to a count WITHOUT loading model weights.
+def _prepare_prompt(hf_id: str, prompt: str) -> tuple[str, int]:
+    """Apply the model's chat template (if any) and count tokens WITHOUT loading weights.
 
-    ``transformers.AutoTokenizer.from_pretrained`` reads only the tokenizer artifacts
-    from the HF cache — it never touches the weight tensors — so this preserves the
-    refuse-before-load property (Rule #1). Lazy-imported like the ``mlx_lm`` import below
-    so the module imports without transformers installed and tests can monkeypatch it.
+    Wraps *prompt* as a single ``{"role": "user", "content": prompt}`` turn and calls
+    ``apply_chat_template`` when the tokenizer exposes one, falling back to the raw string
+    otherwise.  Returns ``(rendered_prompt, token_count)``.
+
+    ``transformers.AutoTokenizer.from_pretrained`` reads only tokenizer artefacts from the
+    HF cache — it never touches weight tensors — so the refuse-before-load property
+    (Rule #1) is preserved.  Lazy-imported so the module loads without transformers
+    installed and tests can monkeypatch ``sys.modules["transformers"]``.
     """
     if not prompt:
-        return 0
+        return prompt, 0
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(hf_id)
-    return len(tok.encode(prompt))
+    if getattr(tok, "chat_template", None):
+        prompt = tok.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False, add_generation_prompt=True,
+        )
+    return prompt, len(tok.encode(prompt))
 
 
 def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
@@ -68,9 +77,10 @@ def generate(hf_id: str, ctx: int, *, prompt: str, margin_gb: float,
     if not info.is_causal:
         return _refused(ctx, f"{hf_id} is not a supported causal language model")
 
-    # Count prompt tokens without loading weights (tokenizer only), then gate on the
-    # effective context this one-shot will actually reach — capped at the ceiling.
-    prompt_tokens = _count_prompt_tokens(hf_id, prompt)
+    # Apply the chat template (tokenizer only, no weights) then count the rendered tokens.
+    # Instruct models need the template; base/completion models fall back to raw.
+    # Gate on the *effective* context the one-shot will actually reach — capped at ceiling.
+    prompt, prompt_tokens = _prepare_prompt(hf_id, prompt)
     effective_ctx = min(ctx, prompt_tokens + max_tokens)
 
     # fp16 (None) unless the cache type can quantize — keeps run consistent with characterize
