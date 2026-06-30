@@ -345,26 +345,30 @@ def test_benchmark_load_failure_returns_refused_dict(monkeypatch):
 # emit empty / garbage output → artifactual ~0 benchmark scores.
 # --------------------------------------------------------------------------- #
 
-def test_run_prompts_applies_chat_template_when_tokenizer_has_one():
-    """Bug: instruct models fed raw prompts emit garbage — the template must be applied.
+def test_run_prompts_passes_templated_token_ids_not_reencoded_string():
+    """Instruct models must get the templated input as TOKEN IDS, not the re-encoded string.
 
-    When the mlx_lm tokenizer exposes apply_chat_template, _run_prompts must wrap
-    each user prompt as a single user turn and render it through the template before
-    tokenizing and generating.  2026-06-29-chat-template-correctness.
+    A templated string already contains <bos>; passing it to mlx_generate (which re-encodes
+    with add_special_tokens=True) prepends a SECOND <bos> (gemma-3: [2,2,...] vs [2,...]) and
+    degrades output. _run_prompts must pass the tokenize=True ids straight through.
+    2026-06-29-mlx-double-bos (#107).
     """
-    prompts_seen: list[str] = []
+    prompts_seen: list = []
 
     def fake_gen(model, tok, prompt=None, max_tokens=None, **kw):
         prompts_seen.append(prompt)
         return "answer"
 
     class _TemplatedTok:
-        """Fake mlx_lm tokenizer with apply_chat_template."""
+        """Fake mlx_lm tokenizer whose apply_chat_template defaults to tokenize=True (like real)."""
 
-        def apply_chat_template(self, messages, *, tokenize=False,
+        def apply_chat_template(self, messages, *, tokenize=True,
                                 add_generation_prompt=False):
             content = messages[0]["content"]
-            return f"<|user|>{content}<|end|><|assistant|>"
+            if not tokenize:
+                return f"<|user|>{content}<|end|><|assistant|>"
+            # single leading BOS (id 2) + one id per word — the path production must use
+            return [2] + [10 + i for i in range(len(content.split()))]
 
         def encode(self, text: str) -> list[int]:
             return list(range(len(text.split())))
@@ -380,8 +384,36 @@ def test_run_prompts_applies_chat_template_when_tokenizer_has_one():
     )
 
     assert results[0]["completion"] == "answer"
-    # The key assertion: the templated string, NOT the raw prompt, reaches mlx_generate.
-    assert prompts_seen == ["<|user|>what is 2+2?<|end|><|assistant|>"]
+    # The key assertion: TOKEN IDS (single BOS), NOT the re-encoded templated string.
+    assert prompts_seen == [[2, 10, 11, 12]]
+
+
+def test_register_turn_end_tokens_adds_present_terminators_only():
+    """register_turn_end_tokens adds known turn-end tokens that exist in the vocab, skips others
+    (unk) and is a no-op without add_eos_token. Fixes gemma-3 rambling past <end_of_turn> (#107)."""
+    from wmx_suite.serve import register_turn_end_tokens
+
+    class _Tok:
+        unk_token_id = 3
+
+        def __init__(self):
+            self.eos: set[int] = set()
+
+        def convert_tokens_to_ids(self, t):
+            return {"<end_of_turn>": 106}.get(t, self.unk_token_id)  # others resolve to unk
+
+        def add_eos_token(self, t):
+            self.eos.add(self.convert_tokens_to_ids(t))
+
+    tok = _Tok()
+    added = register_turn_end_tokens(tok)
+    assert added == [106] and tok.eos == {106}
+
+    class _Bare:  # no add_eos_token -> safe no-op
+        def convert_tokens_to_ids(self, t):
+            return 5
+
+    assert register_turn_end_tokens(_Bare()) == []
 
 
 def test_run_prompts_falls_back_to_raw_when_no_apply_chat_template():

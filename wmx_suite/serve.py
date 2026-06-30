@@ -54,6 +54,42 @@ def governed_max_tokens(prompt_tokens: int, requested_max_tokens: int,
     return min(requested_max_tokens, ceiling - prompt_tokens)
 
 
+# Well-known instruct turn-end tokens. mlx_lm registers only the scalar tokenizer.eos_token_id
+# (e.g. <eos> id 1 for gemma-3), which is NOT the token instruct models emit to end a turn
+# (gemma uses <end_of_turn> id 106). Without it, generation never self-stops — it runs to
+# max_tokens and rambles past the answer, tanking benchmark scoring (#107). The model-author
+# source (generation_config.json eos_token_id) is often stripped from quantized community
+# repos, so we register any well-known terminator that actually exists in this tokenizer's
+# vocab — general (gemma/chatml/llama3/phi), not a per-model hardcode.
+_TURN_END_TOKENS = ("<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<|end|>", "<|endoftext|>")
+
+
+def register_turn_end_tokens(tokenizer) -> list[int]:
+    """Add known instruct turn-end tokens (those present in the vocab) to *tokenizer*'s eos set.
+
+    Only tokens that resolve to a real (non-unk) id are added, so it is a safe no-op for models
+    that don't use a given terminator. Idempotent. Returns the ids added. A no-op on tokenizers
+    without mlx_lm's ``add_eos_token`` (e.g. a bare transformers tokenizer)."""
+    add = getattr(tokenizer, "add_eos_token", None)
+    if not callable(add):
+        return []
+    unk = getattr(tokenizer, "unk_token_id", None)
+    added: list[int] = []
+    for tok_str in _TURN_END_TOKENS:
+        try:
+            tid = tokenizer.convert_tokens_to_ids(tok_str)
+        except Exception:
+            continue
+        if tid is None or tid == unk:
+            continue
+        try:
+            add(tok_str)
+            added.append(tid)
+        except Exception:
+            continue
+    return added
+
+
 # --------------------------------------------------------------------------- #
 # Pre-load gate — mirrors generate.py (Rule #1: never load if gate fails)
 # --------------------------------------------------------------------------- #

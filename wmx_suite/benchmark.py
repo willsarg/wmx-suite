@@ -30,7 +30,7 @@ import argparse
 import json
 import sys
 
-from .serve import _pre_load_gate, governed_max_tokens
+from .serve import _pre_load_gate, governed_max_tokens, register_turn_end_tokens
 
 DEFAULT_MAX_TOKENS = 256
 
@@ -50,23 +50,27 @@ def _run_prompts(prompts: list[str], tokenizer, *, max_tokens: int, ceiling: int
     results: list[dict] = []
     for i, p in enumerate(prompts):
         # Apply the chat template when the tokenizer supports it so instruct models
-        # receive the formatted input they need.  Falls back to the raw prompt for
-        # base/completion models or when template application fails.
+        # receive the formatted input they need.  Pass the rendered TOKEN IDS (not the
+        # re-encoded string) to mlx_generate: a templated string already contains <bos>,
+        # and mlx_generate re-encoding it with add_special_tokens=True prepends a SECOND
+        # <bos> (gemma-3: [2,2,105,...] vs [2,105,...]), degrading output (#107). Falls
+        # back to the raw prompt for base/completion models or when templating fails.
         try:
-            rendered = tokenizer.apply_chat_template(
+            prompt_input = tokenizer.apply_chat_template(
                 [{"role": "user", "content": p}],
-                tokenize=False, add_generation_prompt=True,
+                add_generation_prompt=True,   # tokenize=True (default) -> token ids, single bos
             )
+            prompt_tokens = len(prompt_input)
         except Exception:
-            rendered = p
-        prompt_tokens = len(tokenizer.encode(rendered))
+            prompt_input = p
+            prompt_tokens = len(tokenizer.encode(p))
         allowed = governed_max_tokens(prompt_tokens, max_tokens, ceiling)
         if allowed is None:
             results.append({"prompt_index": i, "refused": True,
                             "reason": f"prompt fills context ceiling {ceiling}"})
         else:
             try:
-                text = mlx_generate(model, tokenizer, prompt=rendered,
+                text = mlx_generate(model, tokenizer, prompt=prompt_input,
                                     max_tokens=allowed, **kv_kwargs)
                 results.append({"prompt_index": i, "completion": text})
             except Exception as exc:
@@ -97,6 +101,9 @@ def benchmark(hf_id: str, ceiling: int, *, prompts: list[str], margin_gb: float,
         first = str(exc).splitlines()[0][:200] if str(exc) else ""
         return {"context": ceiling, "refused": True,
                 "reason": f"failed to load {hf_id}: {type(exc).__name__}: {first}"}
+    # Register instruct turn-end tokens so generation self-stops (mlx_lm only knows the
+    # scalar <eos>, not <end_of_turn> etc.) — else models ramble to max_tokens (#107).
+    register_turn_end_tokens(tokenizer)
     results = _run_prompts(prompts, tokenizer, max_tokens=max_tokens, ceiling=ceiling,
                            effective_kv=effective_kv, mlx_generate=mlx_generate, model=model)
     return {"context": ceiling, "results": results}
